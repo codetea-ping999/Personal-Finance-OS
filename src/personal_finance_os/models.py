@@ -49,6 +49,7 @@ class FinancialSummary:
     net_worth: int
     liquid_assets: int
     monthly_expenses: float
+    monthly_net_cash_flow: float
     emergency_fund_months: float | None
     health_score: int
 
