@@ -2,6 +2,7 @@
 
 from .ai_intents import (
     ClarificationRequired,
+    INTENT_CONTRACT_VERSION,
     FutureLLMIntentProvider,
     Intent,
     IntentKind,
@@ -12,10 +13,13 @@ from .ai_intents import (
     LocalJapaneseIntentProvider,
     LocalRuleIntentProvider,
     MockIntentProvider,
+    PARSER_VERSION,
+    ParserErrorCode,
 )
 
 __all__ = [
     "ClarificationRequired",
+    "INTENT_CONTRACT_VERSION",
     "FutureLLMIntentProvider",
     "Intent",
     "IntentKind",
@@ -26,4 +30,6 @@ __all__ = [
     "LocalJapaneseIntentProvider",
     "LocalRuleIntentProvider",
     "MockIntentProvider",
+    "PARSER_VERSION",
+    "ParserErrorCode",
 ]

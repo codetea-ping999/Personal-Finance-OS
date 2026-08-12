@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
+from typing import Any, Callable
 from uuid import uuid4
 
 from .models import (
@@ -21,13 +22,40 @@ from .models import (
 )
 
 
+class AIActionStateError(RuntimeError):
+    """Raised when an AI action cannot be advanced from its stored state."""
+
+    def __init__(self, action_id: str, state: str) -> None:
+        super().__init__(f"AI action {action_id} is in state {state}")
+        self.action_id = action_id
+        self.state = state
+
+
+class AILedgerChanged(RuntimeError):
+    """Raised when a confirmed action no longer matches its preview ledger."""
+
+    def __init__(self, action_id: str) -> None:
+        super().__init__(f"AI action {action_id} ledger changed")
+        self.action_id = action_id
+
+
+class _ManagedSQLiteConnection(sqlite3.Connection):
+    """Make ``with repository._connect()`` close connections on Windows too."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class FinanceRepository:
     def __init__(self, database: str | Path = "personal_finance.db") -> None:
         self.database = str(database)
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database)
+        connection = sqlite3.connect(self.database, timeout=30, factory=_ManagedSQLiteConnection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
@@ -125,6 +153,13 @@ class FinanceRepository:
                     executed_at TEXT,
                     result_json TEXT,
                     error TEXT,
+                    rule_version TEXT NOT NULL DEFAULT 'unknown',
+                    state_history_json TEXT NOT NULL DEFAULT '[]',
+                    execution_state TEXT NOT NULL DEFAULT 'pending',
+                    execution_started_at TEXT,
+                    execution_owner TEXT,
+                    resume_count INTEGER NOT NULL DEFAULT 0,
+                    failure_code TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE INDEX IF NOT EXISTS idx_ai_action_log_created_at
@@ -133,6 +168,31 @@ class FinanceRepository:
                     ON ai_action_log(state);
                 """
             )
+            self._migrate_ai_action_log(connection)
+
+    @staticmethod
+    def _migrate_ai_action_log(connection: sqlite3.Connection) -> None:
+        """Add only AI CFO columns; legacy ledger tables are never rewritten."""
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(ai_action_log)").fetchall()
+        }
+        additions = (
+            ("rule_version", "TEXT NOT NULL DEFAULT 'unknown'"),
+            ("state_history_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("execution_state", "TEXT NOT NULL DEFAULT 'pending'"),
+            ("execution_started_at", "TEXT"),
+            ("execution_owner", "TEXT"),
+            ("resume_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("failure_code", "TEXT"),
+        )
+        for name, definition in additions:
+            if name not in columns:
+                connection.execute(f"ALTER TABLE ai_action_log ADD COLUMN {name} {definition}")
+        connection.execute(
+            "UPDATE ai_action_log SET execution_state='executed' "
+            "WHERE state='executed' AND execution_state='pending'"
+        )
 
     def create_account(
         self,
@@ -582,6 +642,36 @@ class FinanceRepository:
         if result.rowcount == 0:
             raise ValueError("forecast scenario does not exist")
 
+    @staticmethod
+    def _ledger_fingerprint_for_connection(connection: sqlite3.Connection) -> str:
+        tables = {
+            "accounts": connection.execute(
+                "SELECT id, name, account_type, opening_balance FROM accounts ORDER BY id"
+            ).fetchall(),
+            "transactions": connection.execute(
+                "SELECT id, account_id, booked_on, amount, kind, category, description FROM transactions ORDER BY id"
+            ).fetchall(),
+            "journal_entries": connection.execute(
+                "SELECT id, booked_on, description, debit_account_id, credit_account_id, amount, external_id "
+                "FROM journal_entries ORDER BY id"
+            ).fetchall(),
+            "recurring_cash_flows": connection.execute(
+                "SELECT id, name, flow_type, amount, start_date, end_date FROM recurring_cash_flows ORDER BY id"
+            ).fetchall(),
+            "life_events": connection.execute(
+                "SELECT id, name, start_date, duration_months, event_type, income_delta, expense_delta "
+                "FROM life_events ORDER BY id"
+            ).fetchall(),
+            "forecast_scenarios": connection.execute(
+                "SELECT id, name, initial_balance, income_growth_rate, expense_growth_rate, annual_return_rate "
+                "FROM forecast_scenarios ORDER BY id"
+            ).fetchall(),
+        }
+        payload = {table: [dict(row) for row in rows] for table, rows in tables.items()}
+        return sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
     def ledger_fingerprint(self) -> str:
         """Return a stable digest of state that can affect an AI write.
 
@@ -590,34 +680,18 @@ class FinanceRepository:
         definitions must.
         """
         with self._connect() as connection:
-            tables = {
-                "accounts": connection.execute(
-                    "SELECT id, name, account_type, opening_balance FROM accounts ORDER BY id"
-                ).fetchall(),
-                "transactions": connection.execute(
-                    "SELECT id, account_id, booked_on, amount, kind, category, description FROM transactions ORDER BY id"
-                ).fetchall(),
-                "journal_entries": connection.execute(
-                    "SELECT id, booked_on, description, debit_account_id, credit_account_id, amount, external_id "
-                    "FROM journal_entries ORDER BY id"
-                ).fetchall(),
-                "recurring_cash_flows": connection.execute(
-                    "SELECT id, name, flow_type, amount, start_date, end_date FROM recurring_cash_flows ORDER BY id"
-                ).fetchall(),
-                "life_events": connection.execute(
-                    "SELECT id, name, start_date, duration_months, event_type, income_delta, expense_delta "
-                    "FROM life_events ORDER BY id"
-                ).fetchall(),
-                "forecast_scenarios": connection.execute(
-                    "SELECT id, name, initial_balance, income_growth_rate, expense_growth_rate, annual_return_rate "
-                    "FROM forecast_scenarios ORDER BY id"
-                ).fetchall(),
-            }
-        payload = {
-            table: [dict(row) for row in rows]
-            for table, rows in tables.items()
-        }
-        return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            return self._ledger_fingerprint_for_connection(connection)
+
+    @staticmethod
+    def _history(history_json: object, event: str, at: str, **details: object) -> str:
+        try:
+            history = json.loads(str(history_json or "[]"))
+        except json.JSONDecodeError:
+            history = []
+        if not isinstance(history, list):
+            history = []
+        history.append({"event": event, "state": event, "at": at, **details})
+        return json.dumps(history, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     def create_ai_action_log(
         self,
@@ -632,19 +706,26 @@ class FinanceRepository:
         preview_json: str | None = None,
         result_json: str | None = None,
         error: str | None = None,
+        rule_version: str = "unknown",
+        failure_code: str | None = None,
     ) -> str:
         action_id = str(uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        execution_state = "executed" if state == "executed" else "failed" if state == "failed" else "pending"
+        history = self._history("[]", state, now)
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO ai_action_log(
                     id, raw_input, intent_json, parser_version, state,
                     confirmation_token_hash, expires_at, ledger_fingerprint,
-                    preview_json, result_json, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    preview_json, result_json, error, rule_version,
+                    state_history_json, execution_state, failure_code
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     action_id, raw_input, intent_json, parser_version, state,
                     confirmation_token_hash, expires_at, ledger_fingerprint,
-                    preview_json, result_json, error,
+                    preview_json, result_json, error, rule_version,
+                    history, execution_state, failure_code,
                 ),
             )
         return action_id
@@ -680,23 +761,41 @@ class FinanceRepository:
         executed_at: str | None = None,
         result_json: str | None = None,
         error: str | None = None,
+        execution_state: str | None = None,
+        execution_started_at: str | None = None,
+        failure_code: str | None = None,
     ) -> bool:
-        changes: list[str] = []
-        values: list[object] = []
-        for column, value in (
-            ("state", state),
-            ("confirmed_at", confirmed_at),
-            ("executed_at", executed_at),
-            ("result_json", result_json),
-            ("error", error),
-        ):
-            if value is not None:
-                changes.append(f"{column}=?")
-                values.append(value)
-        if not changes:
-            return False
-        values.append(action_id)
         with self._connect() as connection:
+            current = connection.execute(
+                "SELECT state, state_history_json FROM ai_action_log WHERE id=?",
+                (action_id,),
+            ).fetchone()
+            if current is None:
+                return False
+            changes: list[str] = []
+            values: list[object] = []
+            now = datetime.now(timezone.utc).isoformat()
+            if state is not None:
+                changes.append("state=?")
+                values.append(state)
+                if state != current["state"]:
+                    changes.append("state_history_json=?")
+                    values.append(self._history(current["state_history_json"], state, now))
+            for column, value in (
+                ("confirmed_at", confirmed_at),
+                ("executed_at", executed_at),
+                ("result_json", result_json),
+                ("error", error),
+                ("execution_state", execution_state),
+                ("execution_started_at", execution_started_at),
+                ("failure_code", failure_code),
+            ):
+                if value is not None:
+                    changes.append(f"{column}=?")
+                    values.append(value)
+            if not changes:
+                return False
+            values.append(action_id)
             cursor = connection.execute(
                 f"UPDATE ai_action_log SET {', '.join(changes)} WHERE id=?",
                 values,
@@ -706,9 +805,234 @@ class FinanceRepository:
     def confirm_ai_action(self, action_id: str, confirmed_at: str) -> bool:
         """Atomically reserve a preview for one confirmation attempt."""
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state, state_history_json FROM ai_action_log WHERE id=?",
+                (action_id,),
+            ).fetchone()
+            if row is None or row["state"] != "previewed":
+                connection.rollback()
+                return False
+            history = self._history(row["state_history_json"], "confirmed", confirmed_at)
             cursor = connection.execute(
-                "UPDATE ai_action_log SET state='confirmed', confirmed_at=? "
+                "UPDATE ai_action_log SET state='confirmed', confirmed_at=?, "
+                "execution_state='pending', execution_owner=NULL, error=NULL, failure_code=NULL, state_history_json=? "
                 "WHERE id=? AND state='previewed'",
-                (confirmed_at, action_id),
+                (confirmed_at, history, action_id),
+            )
+            connection.commit()
+        return cursor.rowcount == 1
+
+    def begin_ai_action_execution(
+        self,
+        action_id: str,
+        started_at: str,
+        *,
+        owner_id: str | None = None,
+    ) -> str | None:
+        """Claim an execution attempt; a new process can reclaim an abandoned one."""
+        owner_id = owner_id or uuid4().hex
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state, resume_count, state_history_json "
+                "FROM ai_action_log WHERE id=?",
+                (action_id,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return False
+            if row["state"] != "confirmed":
+                connection.rollback()
+                return False
+            attempt = int(row["resume_count"] or 0) + 1
+            history = self._history(row["state_history_json"], "execution_started", started_at, attempt=attempt)
+            connection.execute(
+                "UPDATE ai_action_log SET execution_state='running', execution_started_at=?, "
+                "execution_owner=?, resume_count=?, error=NULL, failure_code=NULL, state_history_json=? "
+                "WHERE id=? AND state='confirmed'",
+                (started_at, owner_id, attempt, history, action_id),
+            )
+            connection.commit()
+        return owner_id
+
+    def mark_ai_action_failed(self, action_id: str, error: str, failure_code: str) -> bool:
+        """Keep the public state confirmed so a failed attempt can be retried."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT state_history_json FROM ai_action_log WHERE id=? AND state='confirmed'",
+                (action_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            now = datetime.now(timezone.utc).isoformat()
+            history = self._history(row["state_history_json"], "execution_failed", now, code=failure_code)
+            cursor = connection.execute(
+                "UPDATE ai_action_log SET execution_state='failed', execution_owner=NULL, error=?, failure_code=?, "
+                "state_history_json=? WHERE id=? AND state='confirmed'",
+                (error, failure_code, history, action_id),
             )
         return cursor.rowcount == 1
+
+    def reject_ai_action(self, action_id: str, error: str, failure_code: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT state_history_json FROM ai_action_log WHERE id=? AND state='confirmed'",
+                (action_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            now = datetime.now(timezone.utc).isoformat()
+            history = self._history(row["state_history_json"], "rejected", now, code=failure_code)
+            cursor = connection.execute(
+                "UPDATE ai_action_log SET state='rejected', execution_state='rejected', execution_owner=NULL, "
+                "error=?, failure_code=?, state_history_json=? WHERE id=? AND state='confirmed'",
+                (error, failure_code, history, action_id),
+            )
+        return cursor.rowcount == 1
+
+    @staticmethod
+    def _value(value: object) -> object:
+        return getattr(value, "value", value)
+
+    def _execute_ai_operation(self, connection: sqlite3.Connection, operation: str, arguments: dict[str, Any]) -> object:
+        """Write one AI-supported operation on the caller's open transaction."""
+        if operation == "create_transaction":
+            account_id = str(arguments.get("account_id") or "")
+            amount = int(arguments["amount"])
+            kind = TransactionKind(self._value(arguments["kind"]))
+            if kind == TransactionKind.INCOME:
+                signed_amount = amount
+            elif kind == TransactionKind.EXPENSE:
+                signed_amount = -amount
+            else:
+                raise ValueError("AI CFO v1 supports income and expense transactions only")
+            if amount <= 0:
+                raise ValueError("transaction amount must be positive")
+            category = str(arguments["category"]).strip()
+            if not category:
+                raise ValueError("category must not be empty")
+            transaction = Transaction(
+                id=str(uuid4()), account_id=account_id, booked_on=arguments["booked_on"],
+                amount=signed_amount, kind=kind, category=category,
+                description=str(arguments.get("description", "")).strip(),
+            )
+            try:
+                connection.execute(
+                    "INSERT INTO transactions(id, account_id, booked_on, amount, kind, category, description) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (transaction.id, transaction.account_id, transaction.booked_on.isoformat(), transaction.amount,
+                     transaction.kind.value, transaction.category, transaction.description),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("account does not exist") from exc
+            return transaction
+
+        if operation == "create_journal_entry":
+            debit_account_id = str(arguments.get("debit_account_id") or "")
+            credit_account_id = str(arguments.get("credit_account_id") or "")
+            amount = int(arguments["amount"])
+            if amount <= 0:
+                raise ValueError("journal amount must be positive")
+            if debit_account_id == credit_account_id:
+                raise ValueError("debit and credit accounts must differ")
+            entry = JournalEntry(
+                str(uuid4()), arguments["booked_on"], str(arguments.get("description", "")).strip(),
+                debit_account_id, credit_account_id, amount, None,
+            )
+            try:
+                connection.execute(
+                    "INSERT INTO journal_entries(id, booked_on, description, debit_account_id, credit_account_id, amount, external_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (entry.id, entry.booked_on.isoformat(), entry.description, entry.debit_account_id,
+                     entry.credit_account_id, entry.amount, entry.external_id),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("both accounts must exist") from exc
+            return entry
+
+        if operation == "create_recurring_cash_flow":
+            name = str(arguments["name"]).strip()
+            amount = int(arguments["amount"])
+            start_date = arguments["start_date"]
+            end_date = arguments.get("end_date")
+            flow_type = CashFlowType(self._value(arguments["flow_type"]))
+            if not name:
+                raise ValueError("name must not be empty")
+            if amount <= 0:
+                raise ValueError("amount must be positive")
+            if end_date is not None and end_date < start_date:
+                raise ValueError("end_date must be on or after start_date")
+            flow = RecurringCashFlow(str(uuid4()), name, flow_type, amount, start_date, end_date)
+            connection.execute(
+                "INSERT INTO recurring_cash_flows(id, name, flow_type, amount, start_date, end_date) VALUES (?, ?, ?, ?, ?, ?)",
+                (flow.id, flow.name, flow.flow_type.value, flow.amount, flow.start_date.isoformat(),
+                 flow.end_date.isoformat() if flow.end_date else None),
+            )
+            return flow
+
+        if operation == "create_life_event":
+            name = str(arguments["name"]).strip()
+            duration_months = int(arguments["duration_months"])
+            if not name:
+                raise ValueError("name must not be empty")
+            if duration_months <= 0:
+                raise ValueError("duration_months must be positive")
+            event = LifeEvent(
+                str(uuid4()), name, arguments["start_date"], duration_months,
+                LifeEventType(self._value(arguments.get("event_type", LifeEventType.ONE_TIME))),
+                int(arguments.get("income_delta", 0)), int(arguments.get("expense_delta", 0)),
+            )
+            connection.execute(
+                "INSERT INTO life_events(id, name, start_date, duration_months, event_type, income_delta, expense_delta) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (event.id, event.name, event.start_date.isoformat(), event.duration_months, event.event_type.value,
+                 event.income_delta, event.expense_delta),
+            )
+            return event
+
+        raise ValueError(f"unsupported AI operation: {operation}")
+
+    def execute_ai_action(
+        self,
+        action_id: str,
+        operation: str,
+        arguments: dict[str, Any],
+        result_serializer: Callable[[object], str],
+        executed_at: str,
+        execution_owner: str,
+        expected_ledger_fingerprint: str | None = None,
+    ) -> object:
+        """Atomically write the domain row and mark the action executed."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state, execution_state, execution_owner, state_history_json FROM ai_action_log WHERE id=?",
+                (action_id,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise AIActionStateError(action_id, "missing")
+            if row["state"] != "confirmed":
+                connection.rollback()
+                raise AIActionStateError(action_id, str(row["state"]))
+            if row["execution_state"] != "running" or row["execution_owner"] != execution_owner:
+                connection.rollback()
+                raise AIActionStateError(action_id, "claimed_by_other")
+            if (
+                expected_ledger_fingerprint is not None
+                and expected_ledger_fingerprint != self._ledger_fingerprint_for_connection(connection)
+            ):
+                connection.rollback()
+                raise AILedgerChanged(action_id)
+            result = self._execute_ai_operation(connection, operation, arguments)
+            result_json = result_serializer(result)
+            history = self._history(row["state_history_json"], "executed", executed_at)
+            connection.execute(
+                "UPDATE ai_action_log SET state='executed', execution_state='executed', executed_at=?, "
+                "result_json=?, error=NULL, failure_code=NULL, execution_owner=NULL, state_history_json=? "
+                "WHERE id=? AND state='confirmed' AND execution_owner=?",
+                (executed_at, result_json, history, action_id, execution_owner),
+            )
+            connection.commit()
+        return result

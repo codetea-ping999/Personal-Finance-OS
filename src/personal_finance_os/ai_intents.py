@@ -24,6 +24,22 @@ from .models import CashFlowType, LifeEventType, TransactionKind
 
 
 PARSER_VERSION = "jp-local-rules-v1"
+INTENT_CONTRACT_VERSION = "intent-v1"
+
+
+class ParserErrorCode(StrEnum):
+    """Stable machine-readable errors emitted by the v1 local parser."""
+
+    EMPTY_INPUT = "empty_input"
+    UNSUPPORTED_INTENT = "unsupported_intent"
+    MISSING_REQUIRED_FIELD = "missing_required_field"
+    INVALID_DATE = "invalid_date"
+    INVALID_PERIOD = "invalid_period"
+    INVALID_AMOUNT = "invalid_amount"
+    NEGATIVE_AMOUNT = "negative_amount"
+    AMOUNT_UNIT_REQUIRED = "amount_unit_required"
+    INVALID_RATE = "invalid_rate"
+    AMBIGUOUS_VALUE = "ambiguous_value"
 
 
 class IntentType(StrEnum):
@@ -62,6 +78,7 @@ class Intent(BaseModel):
     type: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     parser_version: str = PARSER_VERSION
+    intent_contract_version: str = INTENT_CONTRACT_VERSION
     period: IntentPeriod | None = None
     data_sources: list[str] = Field(default_factory=list)
 
@@ -77,10 +94,19 @@ class Intent(BaseModel):
 class ClarificationRequired(ValueError):
     """Raised when a provider cannot safely normalize a request."""
 
-    def __init__(self, reason: str, questions: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        reason: str,
+        questions: Iterable[str] = (),
+        *,
+        code: str = "clarification_required",
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.questions = list(questions)
+        self.code = code
+        self.details = details or {}
 
 
 class IntentProvider(ABC):
@@ -157,6 +183,8 @@ def _parse_date(value: str, label: str = "日付") -> date:
         raise ClarificationRequired(
             f"{label}を解釈できません: {value}",
             [f"{label}をYYYY-MM-DD形式で指定してください"],
+            code=ParserErrorCode.INVALID_DATE,
+            details={"field": label, "value": value},
         ) from exc
 
 
@@ -174,6 +202,8 @@ def _parse_month_period(text: str) -> IntentPeriod | None:
             raise ClarificationRequired(
                 "対象月を解釈できません",
                 ["対象月をYYYY年MM月形式で指定してください"],
+                code=ParserErrorCode.INVALID_PERIOD,
+                details={"field": "period", "value": f"{year}-{month}"},
             ) from exc
     if "今月" in text:
         today = date.today()
@@ -197,6 +227,8 @@ def _parse_explicit_date(text: str, required: bool = False) -> date | None:
         raise ClarificationRequired(
             "書込みの日付がありません",
             ["書込み日をYYYY-MM-DD形式で指定してください"],
+            code=ParserErrorCode.MISSING_REQUIRED_FIELD,
+            details={"field": "booked_on"},
         )
     return None
 
@@ -205,12 +237,19 @@ def _parse_amount(text: str, *, label: str = "金額", required: bool = True) ->
     # A sign is deliberately captured separately so negative amounts are not
     # silently converted into a valid positive write.
     pattern = r"(?P<sign>[+\-−]?)\s*(?P<number>[\d,]+(?:\.\d+)?)\s*(?P<unit>万円|万|千円|千|円)?"
-    matches = list(re.finditer(pattern, text))
+    # Dates are numeric too; remove them before deciding whether an amount is
+    # missing so a request containing only ``2026年8月12日`` is not misreported
+    # as an amount-without-unit error.
+    amount_text = re.sub(r"\d{4}年\d{1,2}月\d{1,2}日?", "", text)
+    amount_text = re.sub(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}", "", amount_text)
+    matches = list(re.finditer(pattern, amount_text))
     if not matches:
         if required:
             raise ClarificationRequired(
                 f"{label}がありません",
                 [f"{label}を整数の円または万円で指定してください"],
+                code=ParserErrorCode.MISSING_REQUIRED_FIELD,
+                details={"field": label},
             )
         return None
     # Prefer an amount immediately followed by a currency marker. This avoids
@@ -222,23 +261,33 @@ def _parse_amount(text: str, *, label: str = "金額", required: bool = True) ->
             raise ClarificationRequired(
                 f"{label}の単位がありません",
                 [f"{label}に円、千円、または万円を付けてください"],
+                code=ParserErrorCode.AMOUNT_UNIT_REQUIRED,
+                details={"field": label},
             )
         return None
     if match.group("sign") in {"-", "−"}:
         raise ClarificationRequired(
             f"{label}は負数にできません",
             [f"{label}は正数で指定してください"],
+            code=ParserErrorCode.NEGATIVE_AMOUNT,
+            details={"field": label},
         )
     try:
         number = Decimal(match.group("number").replace(",", ""))
     except InvalidOperation as exc:
-        raise ClarificationRequired(f"{label}を解釈できません") from exc
+        raise ClarificationRequired(
+            f"{label}を解釈できません",
+            code=ParserErrorCode.INVALID_AMOUNT,
+            details={"field": label},
+        ) from exc
     multiplier = {None: 1, "円": 1, "千": 1_000, "千円": 1_000, "万": 10_000, "万円": 10_000}
     amount = number * multiplier[match.group("unit")]
     if amount != amount.to_integral_value() or amount <= 0:
         raise ClarificationRequired(
             f"{label}は正の整数円で指定してください",
             [f"{label}を整数の円または万円で指定してください"],
+            code=ParserErrorCode.INVALID_AMOUNT,
+            details={"field": label},
         )
     return int(amount)
 
@@ -249,7 +298,11 @@ def _parse_rate(text: str, default: float | None = None) -> float | None:
         return default
     rate = float(match.group(1)) / 100
     if rate <= -1:
-        raise ClarificationRequired("利率が範囲外です", ["利率は-100%より大きく指定してください"])
+        raise ClarificationRequired(
+            "利率が範囲外です",
+            ["利率は-100%より大きく指定してください"],
+            code=ParserErrorCode.INVALID_RATE,
+        )
     return rate
 
 
@@ -289,41 +342,44 @@ class LocalJapaneseIntentProvider(IntentProvider):
     def parse(self, text: str) -> Intent:
         text = _normalized_text(text)
         if not text:
-            raise ClarificationRequired("入力が空です", ["自然言語の依頼を入力してください"])
+            raise ClarificationRequired(
+                "入力が空です",
+                ["自然言語の依頼を入力してください"],
+                code=ParserErrorCode.EMPTY_INPUT,
+            )
 
-        # Write intents are checked first because they often contain words like
-        # 収支 or 給料 that also occur in read questions.
-        if "借方" in text and "貸方" in text:
-            return self._journal(text)
-        if any(word in text for word in ("ライフイベント", "ライフ・イベント")):
-            return self._life_event(text)
-        if "毎月" in text and any(word in text for word in ("登録", "追加", "記録")):
-            return self._recurring(text)
-        if any(word in text for word in ("登録", "追加", "記録")) and any(
-            word in text for word in ("支出", "出金", "収入", "入金", "給料", "取引")
-        ):
-            return self._transaction(text)
-
-        if "税" in text and any(word in text for word in ("給与", "年収", "所得")):
-            return self._salary_tax(text)
-        if "購入" in text and any(word in text for word in ("シミュレーション", "シュミレーション", "試算", "買う", "買")):
-            return self._purchase(text)
-        if "比較" in text and any(word in text for word in ("予測", "シナリオ", "ケース")):
-            return self._forecast_compare(text)
-        if any(word in text for word in ("将来予測", "資産予測", "フォーキャスト")):
-            return self._forecast(text)
-        if any(word in text for word in ("月次レポート", "月間レポート", "月次報告")):
-            return self._monthly_report(text)
-        if "口座" in text and any(word in text for word in ("一覧", "リスト", "残高", "教えて", "見せて")):
-            return self._account_list(text)
-        if "取引" in text and any(word in text for word in ("一覧", "明細", "履歴", "リスト", "教えて", "見せて")):
-            return self._transaction_list(text)
-        if any(word in text for word in ("収支", "資産", "純資産", "健康スコア", "サマリー")):
-            return self._summary(text)
+        # The order is part of the v1 parser contract.  Writes are checked
+        # before reads because words such as 収支 and 給料 can occur in both.
+        dispatch_table = (
+            (lambda value: "借方" in value and "貸方" in value, self._journal),
+            (lambda value: any(word in value for word in ("ライフイベント", "ライフ・イベント")), self._life_event),
+            (lambda value: "毎月" in value and any(word in value for word in ("登録", "追加", "記録")), self._recurring),
+            (
+                lambda value: any(word in value for word in ("登録", "追加", "記録"))
+                and any(word in value for word in ("支出", "出金", "収入", "入金", "給料", "取引")),
+                self._transaction,
+            ),
+            (lambda value: "税" in value and any(word in value for word in ("給与", "年収", "所得")), self._salary_tax),
+            (
+                lambda value: "購入" in value
+                and any(word in value for word in ("シミュレーション", "シュミレーション", "試算", "買う", "買")),
+                self._purchase,
+            ),
+            (lambda value: "比較" in value and any(word in value for word in ("予測", "シナリオ", "ケース")), self._forecast_compare),
+            (lambda value: any(word in value for word in ("将来予測", "資産予測", "フォーキャスト")), self._forecast),
+            (lambda value: any(word in value for word in ("月次レポート", "月間レポート", "月次報告")), self._monthly_report),
+            (lambda value: "口座" in value and any(word in value for word in ("一覧", "リスト", "残高", "教えて", "見せて")), self._account_list),
+            (lambda value: "取引" in value and any(word in value for word in ("一覧", "明細", "履歴", "リスト", "教えて", "見せて")), self._transaction_list),
+            (lambda value: any(word in value for word in ("収支", "資産", "純資産", "健康スコア", "サマリー")), self._summary),
+        )
+        for matches, parser in dispatch_table:
+            if matches(text):
+                return parser(text)
 
         raise ClarificationRequired(
             "対応するIntentを特定できません",
             ["収支、月次レポート、口座一覧、取引一覧、将来予測、購入シミュレーション、給与所得税のいずれかを指定してください"],
+            code=ParserErrorCode.UNSUPPORTED_INTENT,
         )
 
     def _intent(self, intent_type: str, arguments: dict[str, Any], period: IntentPeriod | None = None) -> Intent:
@@ -342,7 +398,12 @@ class LocalJapaneseIntentProvider(IntentProvider):
     def _monthly_report(self, text: str) -> Intent:
         period = _parse_month_period(text)
         if period is None:
-            raise ClarificationRequired("月次レポートの対象月がありません", ["対象月をYYYY年MM月形式で指定してください"])
+            raise ClarificationRequired(
+                "月次レポートの対象月がありません",
+                ["対象月をYYYY年MM月形式で指定してください"],
+                code=ParserErrorCode.MISSING_REQUIRED_FIELD,
+                details={"field": "period"},
+            )
         return self._intent(IntentType.MONTHLY_REPORT, {"start": period.start, "end": period.end}, period)
 
     def _account_list(self, text: str) -> Intent:
@@ -372,14 +433,24 @@ class LocalJapaneseIntentProvider(IntentProvider):
             period = IntentPeriod(start=start)
         # Explicit separator forms are intentional: "基本ケースと転職ケース".
         match = re.search(
-            r"([^\s、,。]+?ケース)\s*と\s*([^\s、,。]+?ケース)\s*(?:を|の)?(?:将来予測を)?(?:比較|比べ)(?:して)?",
+            r"([^\s、,。]*?ケース)\s*と\s*([^\s、,。]*?ケース)\s*(?:を|の)?(?:将来予測を)?(?:比較|比べ)(?:して)?",
             text,
         )
         if not match:
-            raise ClarificationRequired("比較するケースがありません", ["比較するケースを「AとBを比較」の形式で指定してください"])
+            raise ClarificationRequired(
+                "比較するケースがありません",
+                ["比較するケースを「AとBを比較」の形式で指定してください"],
+                code=ParserErrorCode.MISSING_REQUIRED_FIELD,
+                details={"field": "cases"},
+            )
         names = [item.rsplit("の", 1)[-1].strip(" 「『」』") for item in match.groups()]
         if any(not item or item in {"ケース", "シナリオ"} for item in names):
-            raise ClarificationRequired("比較するケース名が曖昧です", ["比較するケース名を明示してください"])
+            raise ClarificationRequired(
+                "比較するケース名が曖昧です",
+                ["比較するケース名を明示してください"],
+                code=ParserErrorCode.AMBIGUOUS_VALUE,
+                details={"field": "cases"},
+            )
         arguments = {"start_date": period.start if period else None, "period_years": max(1, years // 12), "cases": [{"name": name, "overrides": {}} for name in names]}
         return self._intent(IntentType.FORECAST_COMPARE, arguments, period)
 
@@ -392,15 +463,30 @@ class LocalJapaneseIntentProvider(IntentProvider):
     def _salary_tax(self, text: str) -> Intent:
         year_match = re.search(r"(\d{4})年", text)
         if not year_match:
-            raise ClarificationRequired("税年度がありません", ["税年度をYYYY年形式で指定してください"])
-        amounts = re.findall(r"[+-]?\s*\d+(?:\.\d+)?\s*(?:万円|万|千円|千|円)", text)
+            raise ClarificationRequired(
+                "税年度がありません",
+                ["税年度をYYYY年形式で指定してください"],
+                code=ParserErrorCode.MISSING_REQUIRED_FIELD,
+                details={"field": "tax_year"},
+            )
+        amounts = re.findall(r"[+\-−]?\s*[\d,]+(?:\.\d+)?\s*(?:万円|万|千円|千|円)", text)
         if not amounts:
-            raise ClarificationRequired("給与額がありません", ["年収を正数の円または万円で指定してください"])
+            raise ClarificationRequired(
+                "給与額がありません",
+                ["年収を正数の円または万円で指定してください"],
+                code=ParserErrorCode.MISSING_REQUIRED_FIELD,
+                details={"field": "gross_salary"},
+            )
         salary = _parse_amount(amounts[0], label="年収")
         social = 0
         if any(word in text for word in ("社会保険", "社保")):
             if len(amounts) < 2:
-                raise ClarificationRequired("社会保険料がありません", ["社会保険料を正数の円または万円で指定してください"])
+                raise ClarificationRequired(
+                    "社会保険料がありません",
+                    ["社会保険料を正数の円または万円で指定してください"],
+                    code=ParserErrorCode.MISSING_REQUIRED_FIELD,
+                    details={"field": "social_insurance_premiums"},
+                )
             social = _parse_amount(amounts[1], label="社会保険料") or 0
         tax_year = int(year_match.group(1))
         period = IntentPeriod(start=date(tax_year, 1, 1), end=date(tax_year, 12, 31))
@@ -420,7 +506,12 @@ class LocalJapaneseIntentProvider(IntentProvider):
         elif any(word in text for word in ("expense", "支出")):
             kind = TransactionKind.EXPENSE.value
         else:
-            raise ClarificationRequired("取引種別が曖昧です", ["収入または支出を明示してください"])
+            raise ClarificationRequired(
+                "取引種別が曖昧です",
+                ["収入または支出を明示してください"],
+                code=ParserErrorCode.AMBIGUOUS_VALUE,
+                details={"field": "kind"},
+            )
         account = self._extract_account(text, ("口座", "から", "に"))
         category_match = re.search(
             r"(?:カテゴリ|カテゴリー|科目|項目)\s*[：:=]?\s*([^、,。\s]+?)(?=を|として|登録|追加|記録|$)",
@@ -433,7 +524,12 @@ class LocalJapaneseIntentProvider(IntentProvider):
                     category = candidate
                     break
         if not category:
-            raise ClarificationRequired("カテゴリがありません", ["取引カテゴリを指定してください"])
+            raise ClarificationRequired(
+                "カテゴリがありません",
+                ["取引カテゴリを指定してください"],
+                code=ParserErrorCode.MISSING_REQUIRED_FIELD,
+                details={"field": "category"},
+            )
         description_match = re.search(r"(?:摘要|説明|メモ)\s*[：:]?\s*([^。]+)", text)
         description = description_match.group(1).strip() if description_match else ""
         return self._intent(IntentType.CREATE_TRANSACTION, {
@@ -447,7 +543,12 @@ class LocalJapaneseIntentProvider(IntentProvider):
         debit = self._extract_label_value(text, "借方")
         credit = self._extract_label_value(text, "貸方")
         if not debit or not credit:
-            raise ClarificationRequired("借方または貸方口座がありません", ["借方と貸方の口座名を指定してください"])
+            raise ClarificationRequired(
+                "借方または貸方口座がありません",
+                ["借方と貸方の口座名を指定してください"],
+                code=ParserErrorCode.MISSING_REQUIRED_FIELD,
+                details={"field": "debit_account_name" if not debit else "credit_account_name"},
+            )
         description_match = re.search(r"(?:摘要|説明)\s*[：:=]?\s*([^、。]+)", text)
         description = description_match.group(1).strip() if description_match else ""
         description = re.sub(r"(?:として)?\s*(?:登録|追加|記録)$", "", description).strip().removesuffix("を").strip()
@@ -464,14 +565,24 @@ class LocalJapaneseIntentProvider(IntentProvider):
         elif any(word in text for word in ("収入", "給与", "給料", "入金")):
             flow_type = CashFlowType.INCOME.value
         else:
-            raise ClarificationRequired("定期収支の種別が曖昧です", ["収入または支出を明示してください"])
+            raise ClarificationRequired(
+                "定期収支の種別が曖昧です",
+                ["収入または支出を明示してください"],
+                code=ParserErrorCode.AMBIGUOUS_VALUE,
+                details={"field": "flow_type"},
+            )
         name_match = re.search(r"(?:定期収支|毎月)\s*[「『]?([^、,。]+?)(?:」』)?\s*(?:を|として|が)?\s*(?:毎月|登録|追加)", text)
         name = name_match.group(1).strip(" 「『」』") if name_match else None
         if not name or name in {"収入", "支出"}:
             name_match = re.search(r"(?:給与|給料|家賃|保険|サブスク|賃料)", text)
             name = name_match.group(0) if name_match else None
         if not name:
-            raise ClarificationRequired("定期収支名がありません", ["定期収支の名前を指定してください"])
+            raise ClarificationRequired(
+                "定期収支名がありません",
+                ["定期収支の名前を指定してください"],
+                code=ParserErrorCode.MISSING_REQUIRED_FIELD,
+                details={"field": "name"},
+            )
         end_date = _parse_explicit_date(text[text.find("まで"):] if "まで" in text else "", required=False) if "まで" in text else None
         return self._intent(IntentType.CREATE_RECURRING_CASH_FLOW, {
             "name": name, "flow_type": flow_type, "amount": amount,
@@ -484,8 +595,15 @@ class LocalJapaneseIntentProvider(IntentProvider):
         if not name_match:
             name_match = re.search(r"(?:ライフイベント|ライフ・イベント)\s*[：:=]?\s*([^、,。]+)", text)
         name = name_match.group(1).strip(" 「『」』") if name_match else None
+        if name:
+            name = re.sub(r"\s*(?:を)?(?:登録|追加|記録)$", "", name).strip(" 「『」』")
         if not name:
-            raise ClarificationRequired("ライフイベント名がありません", ["ライフイベント名を指定してください"])
+            raise ClarificationRequired(
+                "ライフイベント名がありません",
+                ["ライフイベント名を指定してください"],
+                code=ParserErrorCode.MISSING_REQUIRED_FIELD,
+                details={"field": "name"},
+            )
         duration = _parse_duration_months(text, 1) or 1
         event_type = LifeEventType.RECURRING.value if any(
             word in text for word in ("毎月", "継続", "期間", "recurring", "定期")
@@ -505,11 +623,10 @@ class LocalJapaneseIntentProvider(IntentProvider):
         )
         return match.group(1).strip() if match else None
 
-    def _extract_account(self, text: str, labels: tuple[str, ...]) -> str:
+    def _extract_account(self, text: str, _labels: tuple[str, ...]) -> str:
         for pattern in (
             r"(?:を|の)\s*([^、,。]+?(?:口座|アカウント))\s*(?:から|に|へ)",
             r"(?:^|[、,])\s*([^、,。]+?(?:口座|アカウント))\s*(?:から|に|へ)",
-            r"(?:を|の)\s*([^、,。\s]+)\s*(?:から|に|へ)",
         ):
             before_account = re.search(pattern, text)
             if before_account:
@@ -517,11 +634,12 @@ class LocalJapaneseIntentProvider(IntentProvider):
         explicit = re.search(r"(?:口座|アカウント)\s*[：:=]?\s*([^、,。]+)", text)
         if explicit:
             return explicit.group(1).strip().removesuffix("から").removesuffix("に").strip()
-        for label in labels:
-            match = re.search(rf"([^、,。\s]+){re.escape(label)}", text)
-            if match:
-                return match.group(1).strip()
-        raise ClarificationRequired("口座名がありません", ["対象口座名を明示してください"])
+        raise ClarificationRequired(
+            "口座名がありません",
+            ["対象口座名を明示してください"],
+            code=ParserErrorCode.MISSING_REQUIRED_FIELD,
+            details={"field": "account_name"},
+        )
 
 
 # Friendly aliases for callers that prefer the shorter names.

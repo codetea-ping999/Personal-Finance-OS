@@ -75,14 +75,16 @@ class AIQueryRequest(BaseModel):
 
 
 class AIConfirmRequest(BaseModel):
-    confirmation_token: str | None = Field(default=None, min_length=1, max_length=200)
-    token: str | None = Field(default=None, min_length=1, max_length=200)
+    # Empty values are validated by AICFOService so the v1 endpoint can return
+    # the documented 400 error contract instead of FastAPI's generic 422 body.
+    confirmation_token: str | None = Field(default=None, max_length=200)
+    token: str | None = Field(default=None, max_length=200)
 
     def resolved_token(self) -> str:
         value = self.confirmation_token or self.token
-        if not value:
-            raise ValueError("confirmation_token is required")
-        return value
+        # Let AICFOService create the stable v1 error/audit contract for a
+        # missing token instead of returning FastAPI's generic request error.
+        return value or ""
 
 
 class RecurringCashFlowCreate(BaseModel):
@@ -489,19 +491,41 @@ def create_app(
         try:
             return ai_cfo.query(payload.resolved_text())
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "invalid_query_request",
+                    "message": str(exc),
+                    "details": {},
+                    "audit_id": None,
+                    "action_id": None,
+                },
+            ) from exc
 
     @app.post("/api/ai/confirm")
     def ai_confirm(payload: AIConfirmRequest):
         try:
             return ai_cfo.confirm(payload.resolved_token())
         except AIActionError as exc:
-            detail: dict[str, object] = {"message": str(exc)}
-            if exc.action_id:
-                detail["action_id"] = exc.action_id
+            detail: dict[str, object] = {
+                "code": exc.code,
+                "message": str(exc),
+                "details": exc.details,
+                "audit_id": exc.audit_id,
+                "action_id": exc.action_id,
+            }
             raise HTTPException(status_code=exc.status_code, detail=detail) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "invalid_confirmation_request",
+                    "message": str(exc),
+                    "details": {},
+                    "audit_id": None,
+                    "action_id": None,
+                },
+            ) from exc
 
     @app.get("/api/ai/audit")
     def ai_audit(limit: int = Query(default=100, ge=1, le=500)):

@@ -123,4 +123,8 @@ the action atomically, and invokes exactly one existing Repository create
 method. The `ai_action_log` table stores the normalized Intent, parser version,
 state, preview and ledger fingerprint, confirmation/execution timestamps,
 result, and error. `GET /api/ai/audit` exposes the audit trail without exposing
-the confirmation-token hash.
+the confirmation-token hash. AI v1 action execution records state history,
+execution ownership, start time, retry count, and failure code. A confirmed
+action is claimed atomically, and its domain insert plus `ai_action_log`
+transition to `executed` commit in one SQLite transaction so a crashed attempt
+can be retried without duplicating the ledger row.
