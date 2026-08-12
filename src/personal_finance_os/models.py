@@ -10,6 +10,9 @@ class AccountType(StrEnum):
     BANK = "bank"
     INVESTMENT = "investment"
     LIABILITY = "liability"
+    EQUITY = "equity"
+    INCOME = "income"
+    EXPENSE = "expense"
 
 
 class TransactionKind(StrEnum):
@@ -17,6 +20,16 @@ class TransactionKind(StrEnum):
     EXPENSE = "expense"
     TRANSFER = "transfer"
     ADJUSTMENT = "adjustment"
+
+
+class CashFlowType(StrEnum):
+    INCOME = "income"
+    EXPENSE = "expense"
+
+
+class LifeEventType(StrEnum):
+    ONE_TIME = "one_time"
+    RECURRING = "recurring"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +49,48 @@ class Transaction:
     kind: TransactionKind
     category: str
     description: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class JournalEntry:
+    id: str
+    booked_on: date
+    description: str
+    debit_account_id: str
+    credit_account_id: str
+    amount: int
+    external_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RecurringCashFlow:
+    id: str
+    name: str
+    flow_type: CashFlowType
+    amount: int
+    start_date: date
+    end_date: date | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LifeEvent:
+    id: str
+    name: str
+    start_date: date
+    duration_months: int
+    event_type: LifeEventType
+    income_delta: int = 0
+    expense_delta: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastScenario:
+    id: str
+    name: str
+    initial_balance: int | None = None
+    income_growth_rate: float = 0.0
+    expense_growth_rate: float = 0.0
+    annual_return_rate: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,3 +121,40 @@ class PurchaseScenario:
     post_purchase_emergency_months: float | None
     affordability_score: int
     verdict: str
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastMonth:
+    month: date
+    starting_balance: int
+    income: int
+    expenses: int
+    net_cash_flow: int
+    interest: int
+    ending_balance: int
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastYear:
+    year: int
+    income: int
+    expenses: int
+    net_cash_flow: int
+    interest: int
+    ending_balance: int
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastResult:
+    scenario_name: str
+    source: str
+    start_date: date
+    end_date: date
+    period_years: int
+    period_months: int
+    initial_balance: int
+    assumptions: dict[str, int | float]
+    monthly: list[ForecastMonth]
+    annual: list[ForecastYear]
+    ending_balance: int
+    minimum_balance: int

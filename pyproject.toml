@@ -25,6 +25,7 @@ personal-finance-os = "personal_finance_os.app:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/personal_finance_os"]
+artifacts = ["data/tax/jp/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

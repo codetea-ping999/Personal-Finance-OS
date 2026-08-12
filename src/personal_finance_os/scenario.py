@@ -1,16 +1,7 @@
 from __future__ import annotations
 
 from .models import FinancialSummary, PurchaseScenario
-
-
-def _future_value(principal: float, monthly_contribution: float, months: int, annual_rate: float) -> float:
-    if months <= 0:
-        return principal
-    monthly_rate = annual_rate / 12
-    if monthly_rate == 0:
-        return principal + monthly_contribution * months
-    growth = (1 + monthly_rate) ** months
-    return principal * growth + monthly_contribution * ((growth - 1) / monthly_rate)
+from .forecast import future_value
 
 
 def simulate_purchase(
@@ -27,9 +18,9 @@ def simulate_purchase(
         raise ValueError("annual_return_rate must be greater than -1")
 
     monthly_surplus = summary.monthly_net_cash_flow
-    baseline = _future_value(summary.assets, monthly_surplus, horizon_months, annual_return_rate)
+    baseline = future_value(summary.assets, monthly_surplus, horizon_months, annual_return_rate)
     after_purchase_assets = max(0, summary.assets - price)
-    purchase = _future_value(after_purchase_assets, monthly_surplus, horizon_months, annual_return_rate)
+    purchase = future_value(after_purchase_assets, monthly_surplus, horizon_months, annual_return_rate)
     opportunity_cost = max(0, round(baseline - purchase))
     post_purchase_liquid = max(0, summary.liquid_assets - price)
     emergency_months = (

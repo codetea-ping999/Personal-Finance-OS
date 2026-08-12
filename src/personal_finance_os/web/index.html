@@ -3,70 +3,238 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Personal Finance OS</title>
+  <title>Personal Finance OS | Financial Digital Twin</title>
   <style>
-    :root { font-family: Inter, system-ui, sans-serif; color:#172033; background:#f4f7fb; }
+    :root { font-family: Inter, system-ui, -apple-system, sans-serif; color:#172033; background:#f4f7fb; }
+    * { box-sizing:border-box; }
     body { margin:0; }
-    main { max-width:1100px; margin:0 auto; padding:32px 20px 64px; }
-    header { display:flex; justify-content:space-between; align-items:end; gap:16px; margin-bottom:24px; }
-    h1 { margin:0; font-size:32px; }
+    main { max-width:1280px; margin:0 auto; padding:28px 18px 64px; }
+    header { display:flex; justify-content:space-between; align-items:end; gap:16px; margin-bottom:22px; }
+    h1 { margin:0; font-size:31px; letter-spacing:-.02em; }
+    h2 { margin:0 0 14px; font-size:20px; }
+    h3 { margin:18px 0 10px; font-size:16px; }
     .muted { color:#657087; }
-    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; }
-    .card { background:white; border:1px solid #e3e8f0; border-radius:16px; padding:18px; box-shadow:0 8px 25px rgba(31,45,61,.05); }
-    .metric { font-size:27px; font-weight:750; margin-top:8px; }
+    .small { font-size:12px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; }
+    .two-col { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:14px; }
+    .card { background:#fff; border:1px solid #e3e8f0; border-radius:16px; padding:18px; box-shadow:0 8px 25px rgba(31,45,61,.05); }
     .wide { margin-top:14px; }
-    form { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; align-items:end; }
+    .metric { font-size:26px; font-weight:750; margin-top:7px; }
+    form { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; align-items:end; }
     label { display:grid; gap:6px; font-size:13px; color:#59657a; }
-    input, select, button { font:inherit; padding:10px 12px; border:1px solid #d7deea; border-radius:10px; background:white; }
-    button { cursor:pointer; background:#172033; color:white; border-color:#172033; }
-    pre { white-space:pre-wrap; background:#f7f9fc; padding:14px; border-radius:12px; overflow:auto; }
+    input, select, button { font:inherit; padding:9px 11px; border:1px solid #d7deea; border-radius:10px; background:#fff; }
+    button { cursor:pointer; background:#172033; color:#fff; border-color:#172033; }
+    button.secondary { background:#edf2f8; border-color:#d7deea; color:#172033; }
+    button.danger { background:#fff2f2; border-color:#f2caca; color:#a32929; }
+    .actions { display:flex; gap:7px; flex-wrap:wrap; }
+    .notice { min-height:22px; color:#8d4c00; margin:8px 0; }
+    .table-wrap { overflow:auto; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { padding:9px 8px; border-bottom:1px solid #edf0f5; text-align:left; white-space:nowrap; }
+    th { color:#657087; font-weight:600; }
+    .chart-wrap { position:relative; width:100%; height:300px; }
+    canvas { width:100%; height:100%; display:block; background:#fbfcfe; border:1px solid #edf0f5; border-radius:12px; }
+    .legend { display:flex; gap:16px; margin-top:8px; font-size:12px; color:#657087; }
+    .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:5px; }
+    .green { background:#2a9d72; } .blue { background:#3f74e8; } .orange { background:#e58b39; }
+    pre { white-space:pre-wrap; background:#f7f9fc; padding:12px; border-radius:12px; overflow:auto; }
+    @media (max-width:640px) { header { align-items:start; flex-direction:column; } main { padding-left:12px; padding-right:12px; } }
   </style>
 </head>
 <body>
 <main>
   <header>
-    <div><h1>Personal Finance OS</h1><div class="muted">Ledger → Metrics → Decisions</div></div>
-    <button onclick="refresh()">更新</button>
+    <div><h1>Financial Digital Twin</h1><div class="muted">Ledger → Deterministic Forecast → Decisions</div></div>
+    <div class="actions"><button class="secondary" onclick="refreshAll()">更新</button><span id="status" class="muted small"></span></div>
   </header>
 
   <section class="grid">
     <div class="card"><div class="muted">純資産</div><div id="netWorth" class="metric">—</div></div>
-    <div class="card"><div class="muted">収入</div><div id="income" class="metric">—</div></div>
-    <div class="card"><div class="muted">支出</div><div id="expenses" class="metric">—</div></div>
+    <div class="card"><div class="muted">直近の収入</div><div id="income" class="metric">—</div></div>
+    <div class="card"><div class="muted">直近の支出</div><div id="expenses" class="metric">—</div></div>
     <div class="card"><div class="muted">Financial Health</div><div id="health" class="metric">—</div></div>
   </section>
 
   <section class="card wide">
-    <h2>口座を追加</h2>
-    <form id="accountForm">
-      <label>名前<input name="name" required placeholder="生活口座" /></label>
-      <label>種類<select name="account_type"><option value="bank">bank</option><option value="cash">cash</option><option value="investment">investment</option><option value="liability">liability</option></select></label>
-      <label>開始残高<input name="opening_balance" type="number" value="0" /></label>
-      <button>追加</button>
+    <h2>定期キャッシュフロー</h2>
+    <div class="muted small">金額は月額・整数の円。終了日を空欄にすると継続します。</div>
+    <form id="recurringForm" style="margin-top:12px">
+      <input name="id" type="hidden" />
+      <label>名称<input name="name" required maxlength="100" placeholder="給与" /></label>
+      <label>種別<select name="flow_type"><option value="income">収入</option><option value="expense">支出</option></select></label>
+      <label>月額<input name="amount" type="number" min="1" required placeholder="300000" /></label>
+      <label>開始日<input name="start_date" type="date" required /></label>
+      <label>終了日<input name="end_date" type="date" /></label>
+      <div class="actions"><button id="recurringSubmit">登録</button><button type="button" class="secondary" onclick="resetRecurringForm()">クリア</button></div>
     </form>
+    <div id="recurringNotice" class="notice"></div>
+    <div class="table-wrap"><table><thead><tr><th>名称</th><th>種別</th><th>月額</th><th>期間</th><th></th></tr></thead><tbody id="recurringRows"></tbody></table></div>
+  </section>
+
+  <section class="card wide">
+    <h2>ライフイベント</h2>
+    <div class="muted small">同月に複数イベントが発生する場合はすべて加算。支出変化は増加を正、減少を負で入力します。</div>
+    <form id="eventForm" style="margin-top:12px">
+      <input name="id" type="hidden" />
+      <label>名称<input name="name" required maxlength="100" placeholder="引っ越し" /></label>
+      <label>開始日<input name="start_date" type="date" required /></label>
+      <label>形式<select name="event_type"><option value="one_time">一時</option><option value="recurring">期間</option></select></label>
+      <label>期間（月）<input name="duration_months" type="number" min="1" value="1" required /></label>
+      <label>収入変化<input name="income_delta" type="number" value="0" /></label>
+      <label>支出変化<input name="expense_delta" type="number" value="0" /></label>
+      <div class="actions"><button id="eventSubmit">登録</button><button type="button" class="secondary" onclick="resetEventForm()">クリア</button></div>
+    </form>
+    <div id="eventNotice" class="notice"></div>
+    <div class="table-wrap"><table><thead><tr><th>名称</th><th>開始</th><th>形式</th><th>期間</th><th>収入変化</th><th>支出変化</th><th></th></tr></thead><tbody id="eventRows"></tbody></table></div>
+  </section>
+
+  <section class="card wide">
+    <h2>予測設定</h2>
+    <form id="forecastForm">
+      <label>予測開始月<input name="start_date" type="date" required /></label>
+      <label>期間（年）<input name="period_years" type="number" min="1" max="50" value="30" required /></label>
+      <label>ケース名<input name="scenario_name" value="Base case" maxlength="100" required /></label>
+      <label>初期残高上書き<input name="initial_balance" type="number" placeholder="台帳から読込" /></label>
+      <label>年収入成長率<input name="income_growth_rate" type="number" step="0.01" placeholder="0.00" /></label>
+      <label>年支出成長率<input name="expense_growth_rate" type="number" step="0.01" placeholder="0.00" /></label>
+      <label>年利率<input name="annual_return_rate" type="number" step="0.01" placeholder="0.00" /></label>
+      <button>予測を実行</button>
+    </form>
+    <div class="muted small" style="margin-top:10px">既定値は30年。予測は保存済みケースの前提を読み込み、入力値がある項目だけ上書きします。</div>
+    <div id="forecastNotice" class="notice"></div>
+  </section>
+
+  <section class="card wide">
+    <h2>予測グラフ</h2>
+    <div id="forecastMeta" class="muted small">予測を実行してください。</div>
+    <div class="chart-wrap" style="margin-top:10px"><canvas id="forecastChart" width="1200" height="300"></canvas></div>
+    <div class="legend"><span><i class="dot blue"></i>月末残高</span><span><i class="dot orange"></i>月次純キャッシュフロー</span></div>
+  </section>
+
+  <section class="card wide">
+    <h2>年次サマリー</h2>
+    <div class="table-wrap"><table><thead><tr><th>年</th><th>収入</th><th>支出</th><th>純CF</th><th>利息</th><th>年末残高</th></tr></thead><tbody id="annualRows"></tbody></table></div>
+  </section>
+
+  <section class="two-col wide">
+    <div class="card">
+      <h2>保存済みケース</h2>
+      <form id="caseForm">
+        <label>ケース名<input name="name" required maxlength="100" placeholder="保守ケース" /></label>
+        <label>初期残高<input name="initial_balance" type="number" placeholder="台帳から読込" /></label>
+        <label>年収入成長率<input name="income_growth_rate" type="number" step="0.01" value="0" /></label>
+        <label>年支出成長率<input name="expense_growth_rate" type="number" step="0.01" value="0" /></label>
+        <label>年利率<input name="annual_return_rate" type="number" step="0.01" value="0" /></label>
+        <button>ケースを保存</button>
+      </form>
+      <div id="caseNotice" class="notice"></div>
+      <div class="table-wrap"><table><thead><tr><th>ケース</th><th>収入成長</th><th>支出成長</th><th>利率</th><th></th></tr></thead><tbody id="caseRows"></tbody></table></div>
+    </div>
+    <div class="card">
+      <h2>ケース比較</h2>
+      <div class="muted small">保存済みケースを選択して、同じ期間で比較します。</div>
+      <div id="compareCases" style="margin:12px 0"></div>
+      <button onclick="compareForecasts()">比較を実行</button>
+      <div id="compareNotice" class="notice"></div>
+      <div class="table-wrap"><table><thead><tr><th>ケース</th><th>最終残高</th><th>最低残高</th><th>累計純CF</th></tr></thead><tbody id="compareRows"></tbody></table></div>
+    </div>
+  </section>
+
+  <section class="two-col wide">
+    <div class="card">
+      <h2>口座・複式仕訳</h2>
+      <form id="accountForm">
+        <label>口座名<input name="name" required placeholder="生活口座" /></label>
+        <label>種類<select name="account_type"><option value="bank">bank</option><option value="cash">cash</option><option value="investment">investment</option><option value="liability">liability</option><option value="income">income</option><option value="expense">expense</option></select></label>
+        <label>開始残高<input name="opening_balance" type="number" value="0" /></label>
+        <button>口座を追加</button>
+      </form>
+      <div id="accountRows" class="muted small" style="margin-top:12px"></div>
+    </div>
+    <div class="card">
+      <h2>給与所得税の概算</h2>
+      <form id="taxForm">
+        <label>税年度<select name="tax_year"><option value="2026">2026年</option><option value="2025">2025年</option></select></label>
+        <label>年間給与<input name="gross_salary" type="number" min="0" value="6000000" required /></label>
+        <label>社会保険料<input name="social_insurance_premiums" type="number" min="0" value="900000" /></label>
+        <button>税額を試算</button>
+      </form>
+      <pre id="taxResult">給与収入と社会保険料を入力してください。</pre>
+    </div>
   </section>
 
   <section class="card wide">
     <h2>購入 What-if</h2>
-    <form id="scenarioForm">
+    <form id="purchaseForm">
       <label>購入価格<input name="price" type="number" min="1" value="300000" required /></label>
       <label>期間（月）<input name="horizon_months" type="number" min="1" value="60" /></label>
       <label>期待年利<input name="annual_return_rate" type="number" step="0.01" value="0.04" /></label>
       <button>試算</button>
     </form>
-    <pre id="scenarioResult">購入判断をここに表示します。</pre>
+    <pre id="purchaseResult">購入判断をここに表示します。</pre>
   </section>
 </main>
 <script>
 const yen = new Intl.NumberFormat('ja-JP',{style:'currency',currency:'JPY',maximumFractionDigits:0});
-async function refresh(){
-  const r=await fetch('/api/summary'); const s=await r.json();
-  netWorth.textContent=yen.format(s.net_worth); income.textContent=yen.format(s.income);
-  expenses.textContent=yen.format(s.expenses); health.textContent=`${s.health_score} / 100`;
+const pct = value => `${(Number(value)*100).toFixed(1)}%`;
+const $ = id => document.getElementById(id);
+let recurring = [], events = [], scenarios = [], latestForecast = null;
+function monthStart(d=new Date()){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`; }
+function setStatus(text){ $('status').textContent=text; }
+function showNotice(id,text){ $(id).textContent=text||''; }
+async function request(url, options={}){
+  const response=await fetch(url,options); const data=await response.json().catch(()=>({}));
+  if(!response.ok) throw new Error(data.detail||`HTTP ${response.status}`); return data;
 }
-accountForm.addEventListener('submit',async e=>{e.preventDefault(); const f=new FormData(e.target); const body=Object.fromEntries(f); body.opening_balance=Number(body.opening_balance); await fetch('/api/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); e.target.reset(); refresh();});
-scenarioForm.addEventListener('submit',async e=>{e.preventDefault(); const f=new FormData(e.target); const body=Object.fromEntries(f); body.price=Number(body.price); body.horizon_months=Number(body.horizon_months); body.annual_return_rate=Number(body.annual_return_rate); const r=await fetch('/api/scenarios/purchase',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const s=await r.json(); scenarioResult.textContent = r.ok ? `判定: ${s.verdict}\n購入可能度: ${s.affordability_score}/100\n購入後流動資産: ${yen.format(s.post_purchase_liquid_assets)}\n機会費用: ${yen.format(s.opportunity_cost)}\n${s.horizon_months}か月後の資産差を含めて定量評価しています。` : JSON.stringify(s,null,2);});
-refresh();
+function bodyFrom(form){ const value=Object.fromEntries(new FormData(form)); for(const k of Object.keys(value)){ if(value[k]==='') value[k]=null; } return value; }
+async function refreshSummary(){
+  const s=await request('/api/summary'); $('netWorth').textContent=yen.format(s.net_worth); $('income').textContent=yen.format(s.income); $('expenses').textContent=yen.format(s.expenses); $('health').textContent=`${s.health_score} / 100`;
+}
+function renderRecurring(){ $('recurringRows').innerHTML=recurring.map(x=>`<tr><td>${x.name}</td><td>${x.flow_type==='income'?'収入':'支出'}</td><td>${yen.format(x.amount)}</td><td>${x.start_date}〜${x.end_date||'継続'}</td><td class="actions"><button class="secondary" onclick="editRecurring('${x.id}')">編集</button><button class="danger" onclick="removeRecurring('${x.id}')">削除</button></td></tr>`).join('')||'<tr><td colspan="5" class="muted">未登録</td></tr>'; }
+function renderEvents(){ $('eventRows').innerHTML=events.map(x=>`<tr><td>${x.name}</td><td>${x.start_date}</td><td>${x.event_type==='one_time'?'一時':'期間'}</td><td>${x.duration_months}</td><td>${yen.format(x.income_delta)}</td><td>${yen.format(x.expense_delta)}</td><td class="actions"><button class="secondary" onclick="editEvent('${x.id}')">編集</button><button class="danger" onclick="removeEvent('${x.id}')">削除</button></td></tr>`).join('')||'<tr><td colspan="7" class="muted">未登録</td></tr>'; }
+function renderScenarios(){
+  $('caseRows').innerHTML=scenarios.map(x=>`<tr><td>${x.name}</td><td>${pct(x.income_growth_rate)}</td><td>${pct(x.expense_growth_rate)}</td><td>${pct(x.annual_return_rate)}</td><td><button class="danger" onclick="removeScenario('${x.id}')">削除</button></td></tr>`).join('')||'<tr><td colspan="5" class="muted">未登録（Base caseは台帳から自動計算）</td></tr>';
+  $('compareCases').innerHTML=scenarios.map(x=>`<label style="display:flex;grid-template-columns:auto 1fr;align-items:center;gap:7px;margin:6px 0"><input type="checkbox" value="${x.name}" checked />${x.name}</label>`).join('')||'<div class="muted small">保存済みケースがありません。</div>';
+}
+function resetRecurringForm(){ const f=$('recurringForm'); f.reset(); f.id.value=''; f.start_date.value=monthStart(); $('recurringSubmit').textContent='登録'; }
+function editRecurring(id){ const x=recurring.find(v=>v.id===id), f=$('recurringForm'); for(const k of ['id','name','flow_type','amount','start_date','end_date']) f[k].value=x[k]??''; $('recurringSubmit').textContent='更新'; window.scrollTo({top:f.closest('.card').offsetTop-12,behavior:'smooth'}); }
+async function removeRecurring(id){ if(!confirm('この定期キャッシュフローを削除しますか？'))return; try{await request(`/api/recurring-cash-flows/${id}`,{method:'DELETE'}); await refreshAll();}catch(e){showNotice('recurringNotice',e.message);} }
+function resetEventForm(){ const f=$('eventForm'); f.reset(); f.id.value=''; f.start_date.value=monthStart(); f.duration_months.value=1; $('eventSubmit').textContent='登録'; }
+function editEvent(id){ const x=events.find(v=>v.id===id), f=$('eventForm'); for(const k of ['id','name','start_date','event_type','duration_months','income_delta','expense_delta']) f[k].value=x[k]??''; $('eventSubmit').textContent='更新'; window.scrollTo({top:f.closest('.card').offsetTop-12,behavior:'smooth'}); }
+async function removeEvent(id){ if(!confirm('このライフイベントを削除しますか？'))return; try{await request(`/api/life-events/${id}`,{method:'DELETE'}); await refreshAll();}catch(e){showNotice('eventNotice',e.message);} }
+async function removeScenario(id){ if(!confirm('この保存済みケースを削除しますか？'))return; try{await request(`/api/forecast-scenarios/${id}`,{method:'DELETE'}); await refreshAll();}catch(e){showNotice('caseNotice',e.message);} }
+function renderForecast(result){
+  latestForecast=result; const a=result.assumptions; $('forecastMeta').textContent=`${result.scenario_name} / ${result.start_date}〜${result.end_date} / ${result.period_years}年 | 初期 ${yen.format(result.initial_balance)} | 収入成長 ${pct(a.income_growth_rate)} | 支出成長 ${pct(a.expense_growth_rate)} | 利率 ${pct(a.annual_return_rate)} | 最終 ${yen.format(result.ending_balance)}`;
+  $('annualRows').innerHTML=result.annual.map(x=>`<tr><td>${x.year}</td><td>${yen.format(x.income)}</td><td>${yen.format(x.expenses)}</td><td>${yen.format(x.net_cash_flow)}</td><td>${yen.format(x.interest)}</td><td>${yen.format(x.ending_balance)}</td></tr>`).join(''); drawChart(result.monthly);
+}
+function drawChart(rows){
+  const canvas=$('forecastChart'), ctx=canvas.getContext('2d'), w=canvas.width, h=canvas.height, pad=36; ctx.clearRect(0,0,w,h); if(!rows.length)return;
+  const balances=rows.map(x=>x.ending_balance), flows=rows.map(x=>x.net_cash_flow); const min=Math.min(0,...balances,...flows), max=Math.max(1,...balances,...flows), range=max-min||1;
+  ctx.strokeStyle='#e7ebf2'; ctx.lineWidth=1; for(let i=0;i<5;i++){const y=pad+(h-pad*1.5)*i/4;ctx.beginPath();ctx.moveTo(pad,y);ctx.lineTo(w-pad,y);ctx.stroke();}
+  const point=(value,index)=>[pad+(w-pad*2)*index/Math.max(1,rows.length-1),pad+(h-pad*1.5)*(1-(value-min)/range)];
+  function path(values,color){ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();values.forEach((v,i)=>{const [x,y]=point(v,i);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();}
+  path(balances,'#3f74e8'); path(flows,'#e58b39'); ctx.fillStyle='#657087';ctx.font='12px system-ui';ctx.fillText(rows[0].month,pad,h-10);ctx.fillText(rows[rows.length-1].month,w-pad-72,h-10);
+}
+async function runForecast(){
+  const raw=bodyFrom($('forecastForm')), body={start_date:raw.start_date,period_years:Number(raw.period_years),scenario_name:raw.scenario_name};
+  for(const k of ['initial_balance','income_growth_rate','expense_growth_rate','annual_return_rate']) if(raw[k]!==null) body[k]=Number(raw[k]);
+  try{showNotice('forecastNotice','計算中…');renderForecast(await request('/api/forecasts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}));showNotice('forecastNotice','計算完了');}catch(e){showNotice('forecastNotice',e.message);}
+}
+async function compareForecasts(){
+  const names=[...document.querySelectorAll('#compareCases input:checked')].map(x=>x.value); if(!names.length){showNotice('compareNotice','比較するケースを選択してください。');return;}
+  const f=bodyFrom($('forecastForm')); try{const result=await request('/api/forecasts/compare',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({start_date:f.start_date,period_years:Number(f.period_years),cases:names.map(name=>({name}))})}); $('compareRows').innerHTML=result.cases.map(x=>`<tr><td>${x.scenario_name}</td><td>${yen.format(x.ending_balance)}</td><td>${yen.format(x.minimum_balance)}</td><td>${yen.format(x.monthly.reduce((s,m)=>s+m.net_cash_flow,0))}</td></tr>`).join('');showNotice('compareNotice','比較完了');}catch(e){showNotice('compareNotice',e.message);}
+}
+async function refreshAll(){
+  try{setStatus('更新中…');[recurring,events,scenarios]=await Promise.all([request('/api/recurring-cash-flows'),request('/api/life-events'),request('/api/forecast-scenarios')]);renderRecurring();renderEvents();renderScenarios();await refreshSummary();const accounts=await request('/api/accounts');$('accountRows').innerHTML=accounts.map(x=>`${x.name}: ${x.id} / ${yen.format(x.balance)}`).join('<br>')||'口座なし';setStatus(`最終更新 ${new Date().toLocaleTimeString('ja-JP')}`);}catch(e){setStatus(e.message);}
+}
+$('recurringForm').addEventListener('submit',async e=>{e.preventDefault();const f=bodyFrom(e.target),id=f.id;delete f.id;f.amount=Number(f.amount);try{await request(id?`/api/recurring-cash-flows/${id}`:'/api/recurring-cash-flows',{method:id?'PATCH':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});resetRecurringForm();showNotice('recurringNotice','保存しました');await refreshAll();}catch(x){showNotice('recurringNotice',x.message);}});
+$('eventForm').addEventListener('submit',async e=>{e.preventDefault();const f=bodyFrom(e.target),id=f.id;delete f.id;for(const k of ['duration_months','income_delta','expense_delta'])f[k]=Number(f[k]);try{await request(id?`/api/life-events/${id}`:'/api/life-events',{method:id?'PATCH':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});resetEventForm();showNotice('eventNotice','保存しました');await refreshAll();}catch(x){showNotice('eventNotice',x.message);}});
+$('forecastForm').addEventListener('submit',e=>{e.preventDefault();runForecast();});
+$('caseForm').addEventListener('submit',async e=>{e.preventDefault();const f=bodyFrom(e.target);for(const k of ['initial_balance','income_growth_rate','expense_growth_rate','annual_return_rate'])if(f[k]!==null)f[k]=Number(f[k]);try{await request('/api/forecast-scenarios',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});e.target.reset();showNotice('caseNotice','保存しました');await refreshAll();}catch(x){showNotice('caseNotice',x.message);}});
+$('accountForm').addEventListener('submit',async e=>{e.preventDefault();const f=bodyFrom(e.target);f.opening_balance=Number(f.opening_balance);try{await request('/api/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});e.target.reset();await refreshAll();}catch(x){alert(x.message);}});
+$('taxForm').addEventListener('submit',async e=>{e.preventDefault();const f=bodyFrom(e.target);for(const k of ['tax_year','gross_salary','social_insurance_premiums'])f[k]=Number(f[k]);try{const t=await request('/api/tax/estimate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});$('taxResult').textContent=`給与所得控除: ${yen.format(t.employment_income_deduction)}\n給与所得: ${yen.format(t.employment_income)}\n課税所得: ${yen.format(t.taxable_income)}\n所得税等: ${yen.format(t.total_tax)}\nルール: ${t.rule_version}`;}catch(x){$('taxResult').textContent=x.message;}});
+$('purchaseForm').addEventListener('submit',async e=>{e.preventDefault();const f=bodyFrom(e.target);for(const k of ['price','horizon_months','annual_return_rate'])f[k]=Number(f[k]);try{const s=await request('/api/scenarios/purchase',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});$('purchaseResult').textContent=`判定: ${s.verdict}\n購入可能度: ${s.affordability_score}/100\n購入後流動資産: ${yen.format(s.post_purchase_liquid_assets)}\n機会費用: ${yen.format(s.opportunity_cost)}\n${s.horizon_months}か月後の資産差を含めて定量評価しています。`;}catch(x){$('purchaseResult').textContent=x.message;}});
+$('recurringForm').start_date.value=monthStart(); $('eventForm').start_date.value=monthStart(); $('forecastForm').start_date.value=monthStart(); refreshAll();
 </script>
 </body>
 </html>

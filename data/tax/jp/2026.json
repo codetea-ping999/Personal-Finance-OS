@@ -1,0 +1,45 @@
+{
+  "jurisdiction": "JP",
+  "tax_year": 2026,
+  "version": "jp-income-tax-2026-v1",
+  "effective_from": "2026-12-01",
+  "employment_income_deduction": [
+    {"max_salary": 690000, "kind": "income_fixed", "amount": 0},
+    {"max_salary": 741000, "kind": "income_fixed", "amount": 0},
+    {"max_salary": 2190000, "kind": "salary_minus", "offset": 740000},
+    {"max_salary": 2193000, "kind": "income_fixed", "amount": 1451000},
+    {"max_salary": 2196000, "kind": "income_fixed", "amount": 1453000},
+    {"max_salary": 2200000, "kind": "income_fixed", "amount": 1456000},
+    {"max_salary": 3600000, "kind": "rate_plus", "rate": 0.30, "addition": 80000},
+    {"max_salary": 6600000, "kind": "rate_plus", "rate": 0.20, "addition": 440000},
+    {"max_salary": 8500000, "kind": "rate_plus", "rate": 0.10, "addition": 1100000},
+    {"max_salary": null, "kind": "fixed", "amount": 1950000}
+  ],
+  "basic_deductions": [
+    {"max_total_income": 1320000, "amount": 1040000},
+    {"max_total_income": 3360000, "amount": 620000},
+    {"max_total_income": 4890000, "amount": 680000},
+    {"max_total_income": 6550000, "amount": 670000},
+    {"max_total_income": 23500000, "amount": 620000},
+    {"max_total_income": 24000000, "amount": 480000},
+    {"max_total_income": 24500000, "amount": 320000},
+    {"max_total_income": 25000000, "amount": 160000},
+    {"max_total_income": null, "amount": 0}
+  ],
+  "income_tax_brackets": [
+    {"upper_bound": 1949000, "rate": 0.05, "deduction": 0},
+    {"upper_bound": 3299000, "rate": 0.10, "deduction": 97500},
+    {"upper_bound": 6949000, "rate": 0.20, "deduction": 427500},
+    {"upper_bound": 8999000, "rate": 0.23, "deduction": 636000},
+    {"upper_bound": 17999000, "rate": 0.33, "deduction": 1536000},
+    {"upper_bound": 39999000, "rate": 0.40, "deduction": 2796000},
+    {"upper_bound": null, "rate": 0.45, "deduction": 4796000}
+  ],
+  "reconstruction_special_tax_rate": 0.021,
+  "rounding": {"taxable_income_unit": 1000, "tax_rounding": "floor_yen", "special_tax_rounding": "floor_yen"},
+  "sources": [
+    {"title": "令和8年度税制改正による所得税の基礎控除の引上げ等", "url": "https://www.nta.go.jp/users/gensen/2026kiso/index.htm", "retrieved_on": "2026-08-12", "laws": ["所得税法86", "租税特別措置法41条の16の2"]},
+    {"title": "所得税の税率", "url": "https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/2260.htm", "retrieved_on": "2026-08-12", "laws": ["所得税法89", "復興財源確保法8-18"]},
+    {"title": "給与所得控除", "url": "https://www.nta.go.jp/taxes/shiraberu/taxanswer/shotoku/1410.htm", "retrieved_on": "2026-08-12", "laws": ["所得税法28"]}
+  ]
+}

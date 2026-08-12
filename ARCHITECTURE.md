@@ -39,4 +39,88 @@ Explanations                              Accounting rules
 - `category`
 - `description`
 
+### Phase 2 journal
+
+`journal_entries` stores one balanced transfer between two accounts:
+
+- `booked_on`, `description`, `amount`
+- `debit_account_id`, `credit_account_id`
+- optional unique `external_id` for safe imports
+
+Amounts are positive. Asset and expense accounts increase on the debit side;
+income, liability and equity accounts increase on the credit side. The legacy
+`transactions` table remains supported for backward compatibility during migration.
+
+The monthly report endpoint derives income, expenses, assets, liabilities and
+equity from journal rows and current account balances. It does not accept
+client-supplied totals.
+
+### Phase 3 salary tax
+
+Tax rules are stored in `data/tax/jp/{tax_year}.json`, not in Python constants.
+The tax engine loads exactly the requested year and fails explicitly when the
+file is missing or invalid. Salary tax estimates include the rule version and
+official source metadata so each result is traceable.
+
 Phase 2 will introduce journals and postings so transfers, liabilities, receivables and accrual accounting are represented with proper double-entry invariants.
+
+## Phase 4 digital twin
+
+The forecast path is separate from historical ledger reporting:
+
+```text
+SQLite ledger balance as of forecast start
+              +
+recurring_cash_flows + life_events
+              |
+       ForecastEngine (deterministic)
+              |
+       monthly rows + annual summaries
+              |
+       FastAPI / browser dashboard
+```
+
+`recurring_cash_flows` stores positive monthly amounts with an income/expense
+type and optional end date. `life_events` stores month-aligned one-time or
+duration-based changes. `forecast_scenarios` stores reusable initial balance,
+income growth, expense growth and annual return assumptions.
+
+Forecasts default to 30 years and accept 1–50 years. The engine compounds
+growth and return assumptions deterministically, applies all active events in
+the same month, applies monthly return to the beginning-of-month balance, and
+returns the assumptions used alongside the result so a projection can be
+reproduced. Taxes, social insurance, investment product details and Monte
+Carlo remain outside this phase.
+
+## Phase 5 AI CFO
+
+The AI CFO layer is an orchestration boundary, not a calculation engine:
+
+```text
+Japanese natural language
+          |
+  IntentProvider (local rules / mock / future structured LLM adapter)
+          |
+  Pydantic validated Intent
+          |
+  Existing deterministic services and repositories
+          |
+  Explainable result or write preview
+```
+
+`Intent` carries its type, normalized arguments, parser version, target period,
+and data sources. The local provider has a deliberately limited Japanese
+vocabulary and raises clarification instead of guessing. The `LLMIntentProvider`
+interface can be implemented later without moving arithmetic or repository
+access into the provider.
+
+Read requests are exposed through `POST /api/ai/queries`. Supported reads are
+summary/health, monthly report, account and transaction lists, forecast and
+scenario comparison, purchase simulation, and Japanese salary-income tax.
+Create requests return a preview. `POST /api/ai/confirm` hashes and validates
+the one-time token, checks expiry, recomputes the ledger fingerprint, reserves
+the action atomically, and invokes exactly one existing Repository create
+method. The `ai_action_log` table stores the normalized Intent, parser version,
+state, preview and ledger fingerprint, confirmation/execution timestamps,
+result, and error. `GET /api/ai/audit` exposes the audit trail without exposing
+the confirmation-token hash.
