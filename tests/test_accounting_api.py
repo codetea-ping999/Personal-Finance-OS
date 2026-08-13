@@ -35,6 +35,53 @@ def test_reconciliation_reports_difference(tmp_path):
     assert response.json()["status"] == "difference_found"
 
 
+def test_statement_import_matching_and_transaction_confirmation(tmp_path):
+    client = TestClient(create_app(str(tmp_path / "finance.db")))
+    bank = client.post("/api/accounts", json={"name": "Bank", "account_type": "bank"}).json()
+    transaction = client.post("/api/transactions", json={
+        "account_id": bank["id"], "booked_on": "2026-08-02", "amount": -5000,
+        "kind": "expense", "category": "food", "description": "lunch",
+    }).json()
+    payload = {"account_id": bank["id"], "mapping": {"date": "date", "amount": "amount", "description": "memo", "balance": "balance"}, "csv_text": "date,amount,memo,balance\n2026/08/02,-5000,lunch,95000\n2026/08/03,10000,salary,105000\n"}
+    imported = client.post("/api/statement-imports", json=payload)
+    assert imported.status_code == 201
+    assert imported.json()["imported"] == 2
+    reconciliation = client.get(f"/api/statement-accounts/{bank['id']}/reconciliation").json()
+    assert reconciliation["statement_balance"] == 105000
+    assert reconciliation["difference"] == 110000
+    assert client.post("/api/statement-imports", json=payload).json()["skipped"] == 2
+    lines = client.get("/api/statement-lines", params={"account_id": bank["id"]}).json()
+    candidates = client.get(f"/api/statement-lines/{lines[0]['id']}/candidates").json()["candidates"]
+    assert candidates[0]["id"] == transaction["id"]
+    assert client.post(f"/api/statement-lines/{lines[0]['id']}/match", json={"matched_type": "transaction", "matched_id": transaction["id"]}).status_code == 200
+    created = client.post(f"/api/statement-lines/{lines[1]['id']}/transaction", json={"kind": "income", "category": "salary"})
+    assert created.status_code == 201
+    assert created.json()["amount"] == 10000
+
+
+def test_statement_import_deposit_withdrawal_and_transfer(tmp_path):
+    client = TestClient(create_app(str(tmp_path / "finance.db")))
+    first = client.post("/api/accounts", json={"name": "First", "account_type": "bank"}).json()
+    second = client.post("/api/accounts", json={"name": "Second", "account_type": "cash"}).json()
+    for account, csv_text in ((first, "date,in,out\n2026-08-04,0,3000\n"), (second, "date,in,out\n2026-08-05,3000,0\n")):
+        response = client.post("/api/statement-imports", json={"account_id": account["id"], "mapping": {"date": "date", "deposit": "in", "withdrawal": "out"}, "csv_text": csv_text})
+        assert response.status_code == 201
+    lines = client.get("/api/statement-lines").json()
+    outgoing = next(line for line in lines if line["amount"] < 0)
+    candidates = client.get(f"/api/statement-lines/{outgoing['id']}/transfer-candidates").json()["candidates"]
+    result = client.post(f"/api/statement-lines/{outgoing['id']}/transfer", json={"other_line_id": candidates[0]["id"]})
+    assert result.status_code == 201
+    assert result.json()["amount"] == 3000
+
+
+def test_statement_import_rejects_bad_rows_without_saving(tmp_path):
+    client = TestClient(create_app(str(tmp_path / "finance.db")))
+    bank = client.post("/api/accounts", json={"name": "Bank", "account_type": "bank"}).json()
+    response = client.post("/api/statement-imports", json={"account_id": bank["id"], "mapping": {"date": "date", "amount": "amount"}, "csv_text": "date,amount\n2026-08-01,100\nbad,-20\n"})
+    assert response.status_code == 400
+    assert client.get("/api/statement-lines").json() == []
+
+
 def test_salary_tax_api_returns_breakdown_and_sources(tmp_path):
     client = TestClient(create_app(str(tmp_path / "finance.db")))
     response = client.post("/api/tax/estimate", json={

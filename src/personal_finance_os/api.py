@@ -14,7 +14,7 @@ from .ai_cfo import AICFOService, AIActionError
 from .ai_intents import IntentProvider
 from .analytics import FinanceAnalyzer
 from .forecast import DEFAULT_FORECAST_YEARS, ForecastEngine
-from .models import AccountType, CashFlowType, LifeEventType, TransactionKind
+from .models import AccountType, CashFlowType, LifeEventType, StatementLineState, TransactionKind
 from .repository import FinanceRepository
 from .scenario import simulate_purchase
 from .tax_engine import estimate_salary_tax
@@ -53,6 +53,26 @@ class JournalEntryCreate(BaseModel):
 class ReconciliationRequest(BaseModel):
     account_id: str
     statement_balance: int
+
+
+class StatementImportRequest(BaseModel):
+    account_id: str
+    csv_text: str = Field(min_length=1)
+    mapping: dict[str, str]
+
+
+class StatementMatchRequest(BaseModel):
+    matched_type: str = Field(pattern="^(transaction|journal_entry)$")
+    matched_id: str = Field(min_length=1)
+
+
+class StatementTransactionRequest(BaseModel):
+    kind: TransactionKind
+    category: str = Field(min_length=1, max_length=100)
+
+
+class StatementTransferRequest(BaseModel):
+    other_line_id: str = Field(min_length=1)
 
 
 class SalaryTaxEstimateRequest(BaseModel):
@@ -436,6 +456,81 @@ def create_app(
         return {"account_id": payload.account_id, "ledger_balance": ledger_balance,
                 "statement_balance": payload.statement_balance, "difference": difference,
                 "status": "reconciled" if difference == 0 else "difference_found"}
+
+    @app.post("/api/statement-imports", status_code=201)
+    def import_statement(payload: StatementImportRequest):
+        try:
+            return repository.import_statement_csv(**payload.model_dump())
+        except ValueError as exc:
+            status = 404 if "account does not exist" in str(exc) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.get("/api/statement-imports")
+    def list_statement_imports(account_id: str | None = None):
+        return repository.list_statement_imports(account_id)
+
+    @app.get("/api/statement-lines")
+    def list_statement_lines(account_id: str | None = None, state: StatementLineState | None = None):
+        return [asdict(line) for line in repository.list_statement_lines(account_id, state.value if state else None)]
+
+    @app.get("/api/statement-accounts/{account_id}/reconciliation")
+    def statement_reconciliation(account_id: str):
+        if account_id not in {account.id for account in repository.list_accounts()}:
+            raise HTTPException(status_code=404, detail="account does not exist")
+        statement_balance = repository.latest_statement_balance(account_id)
+        if statement_balance is None:
+            raise HTTPException(status_code=404, detail="no statement balance is available for account")
+        ledger_balance = repository.account_balances()[account_id]
+        difference = statement_balance - ledger_balance
+        return {"account_id": account_id, "ledger_balance": ledger_balance, "statement_balance": statement_balance,
+                "difference": difference, "status": "reconciled" if difference == 0 else "difference_found"}
+
+    @app.get("/api/statement-lines/{line_id}/candidates")
+    def statement_candidates(line_id: str):
+        try:
+            return {"candidates": repository.statement_candidates(line_id)}
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/statement-lines/{line_id}/transfer-candidates")
+    def transfer_candidates(line_id: str):
+        try:
+            line = next(item for item in repository.list_statement_lines() if item.id == line_id)
+        except StopIteration as exc:
+            raise HTTPException(status_code=404, detail="statement line does not exist") from exc
+        candidates = [asdict(item) for item in repository.list_statement_lines() if item.id != line.id and item.account_id != line.account_id and item.amount == -line.amount and abs((item.booked_on - line.booked_on).days) <= 3 and item.state not in {StatementLineState.MATCHED, StatementLineState.EXCLUDED}]
+        return {"candidates": candidates}
+
+    @app.post("/api/statement-lines/{line_id}/match")
+    def match_statement_line(line_id: str, payload: StatementMatchRequest):
+        try:
+            return asdict(repository.set_statement_state(line_id, StatementLineState.MATCHED, **payload.model_dump()))
+        except ValueError as exc:
+            status = 404 if "does not exist" in str(exc) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.post("/api/statement-lines/{line_id}/exclude")
+    def exclude_statement_line(line_id: str):
+        try:
+            return asdict(repository.set_statement_state(line_id, StatementLineState.EXCLUDED))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/statement-lines/{line_id}/transaction", status_code=201)
+    def create_statement_transaction(line_id: str, payload: StatementTransactionRequest):
+        try:
+            return asdict(repository.create_transaction_from_statement(line_id, **payload.model_dump()))
+        except ValueError as exc:
+            status = 404 if "does not exist" in str(exc) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.post("/api/statement-lines/{line_id}/transfer", status_code=201)
+    def create_statement_transfer(line_id: str, payload: StatementTransferRequest):
+        try:
+            return asdict(repository.create_transfer_from_statements(line_id, payload.other_line_id))
+        except ValueError as exc:
+            status = 404 if "does not exist" in str(exc) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
 
     @app.post("/api/tax/estimate")
     def estimate_tax(payload: SalaryTaxEstimateRequest):

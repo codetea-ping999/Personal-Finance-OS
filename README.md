@@ -51,6 +51,21 @@ uvicorn personal_finance_os.api:app --reload
 
 Open `http://127.0.0.1:8000`.
 
+## Development harness
+
+For agent-assisted or human changes, read [AGENTS.md](AGENTS.md) and use the
+same full verification gate locally and in CI:
+
+```bash
+python scripts/check.py
+```
+
+The repository's builder → verifier loop, risk tiers, acceptance-check
+template, and escalation boundaries are documented in
+[docs/AGENT_HARNESS.md](docs/AGENT_HARNESS.md). In particular, do not use
+`personal_finance.db` as a test fixture or let an AI path bypass deterministic
+calculation, confirmation, or audit controls.
+
 ## API examples
 
 Create an account:

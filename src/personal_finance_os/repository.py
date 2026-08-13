@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import csv
+import io
 from datetime import date, datetime, timezone
 from hashlib import sha256
 import json
@@ -17,6 +19,8 @@ from .models import (
     LifeEvent,
     LifeEventType,
     RecurringCashFlow,
+    StatementLine,
+    StatementLineState,
     Transaction,
     TransactionKind,
 )
@@ -101,6 +105,32 @@ class FinanceRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_journal_entries_booked_on
                     ON journal_entries(booked_on);
+
+                CREATE TABLE IF NOT EXISTS statement_imports (
+                    id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    mapping_json TEXT NOT NULL,
+                    imported_count INTEGER NOT NULL,
+                    skipped_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS statement_lines (
+                    id TEXT PRIMARY KEY,
+                    import_id TEXT NOT NULL REFERENCES statement_imports(id) ON DELETE CASCADE,
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    booked_on TEXT NOT NULL,
+                    amount INTEGER NOT NULL CHECK(amount <> 0),
+                    description TEXT NOT NULL DEFAULT '',
+                    statement_balance INTEGER,
+                    fingerprint TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'unmatched' CHECK(state IN ('unmatched','suggested','matched','excluded')),
+                    matched_type TEXT,
+                    matched_id TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(account_id, fingerprint)
+                );
+                CREATE INDEX IF NOT EXISTS idx_statement_lines_account_state
+                    ON statement_lines(account_id, state, booked_on);
 
                 CREATE TABLE IF NOT EXISTS recurring_cash_flows (
                     id TEXT PRIMARY KEY,
@@ -393,6 +423,154 @@ class FinanceRepository:
                 else:
                     raise
         return imported, skipped
+
+    @staticmethod
+    def _statement_amount(value: str) -> int:
+        cleaned = value.strip().replace(",", "").replace("¥", "").replace("￥", "")
+        if not cleaned:
+            return 0
+        try:
+            number = float(cleaned)
+        except ValueError as exc:
+            raise ValueError(f"invalid amount: {value}") from exc
+        if not number.is_integer():
+            raise ValueError("statement amounts must be whole yen")
+        return int(number)
+
+    @staticmethod
+    def _statement_date(value: str) -> date:
+        value = value.strip().replace("/", "-")
+        try:
+            return date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(f"invalid date: {value}") from exc
+
+    def import_statement_csv(self, account_id: str, csv_text: str, mapping: dict[str, str]) -> dict[str, object]:
+        account = next((item for item in self.list_accounts() if item.id == account_id), None)
+        if account is None:
+            raise ValueError("account does not exist")
+        if account.account_type not in {AccountType.BANK, AccountType.CASH}:
+            raise ValueError("statement imports support bank and cash accounts only")
+        rows = list(csv.DictReader(io.StringIO(csv_text)))
+        date_column = mapping.get("date")
+        amount_column = mapping.get("amount")
+        deposit_column, withdrawal_column = mapping.get("deposit"), mapping.get("withdrawal")
+        if not rows or not date_column or (not amount_column and not (deposit_column and withdrawal_column)):
+            raise ValueError("mapping requires date and either amount or both deposit and withdrawal columns")
+        headers = set(rows[0])
+        required = [date_column] + ([amount_column] if amount_column else [deposit_column, withdrawal_column])
+        if any(column not in headers for column in required):
+            raise ValueError("CSV does not contain every mapped required column")
+        parsed: list[tuple[date, int, str, int | None, str]] = []
+        for number, row in enumerate(rows, start=2):
+            try:
+                booked_on = self._statement_date(row.get(date_column, ""))
+                amount = self._statement_amount(row.get(amount_column, "")) if amount_column else (
+                    self._statement_amount(row.get(deposit_column, "")) - self._statement_amount(row.get(withdrawal_column, ""))
+                )
+                if amount == 0:
+                    raise ValueError("amount must not be zero")
+                description = (row.get(mapping.get("description", ""), "") or "").strip()
+                balance_raw = (row.get(mapping.get("balance", ""), "") or "").strip()
+                balance = self._statement_amount(balance_raw) if balance_raw else None
+                fingerprint = sha256(f"{account_id}|{booked_on.isoformat()}|{amount}|{description}|{balance}".encode()).hexdigest()
+                parsed.append((booked_on, amount, description, balance, fingerprint))
+            except ValueError as exc:
+                raise ValueError(f"row {number}: {exc}") from exc
+        import_id = str(uuid4())
+        imported = skipped = 0
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO statement_imports(id, account_id, mapping_json, imported_count, skipped_count) VALUES (?, ?, ?, 0, 0)",
+                (import_id, account_id, json.dumps(mapping, ensure_ascii=False, sort_keys=True)),
+            )
+            for booked_on, amount, description, balance, fingerprint in parsed:
+                result = connection.execute(
+                    """INSERT OR IGNORE INTO statement_lines
+                    (id, import_id, account_id, booked_on, amount, description, statement_balance, fingerprint)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (str(uuid4()), import_id, account_id, booked_on.isoformat(), amount, description, balance, fingerprint),
+                )
+                imported += result.rowcount
+                skipped += 1 - result.rowcount
+            connection.execute("UPDATE statement_imports SET imported_count=?, skipped_count=? WHERE id=?", (imported, skipped, import_id))
+        return {"import_id": import_id, "imported": imported, "skipped": skipped}
+
+    def list_statement_imports(self, account_id: str | None = None) -> list[dict[str, object]]:
+        query = "SELECT * FROM statement_imports" + (" WHERE account_id=?" if account_id else "") + " ORDER BY created_at DESC"
+        with self._connect() as connection:
+            rows = connection.execute(query, (account_id,) if account_id else ()).fetchall()
+        return [dict(row) | {"mapping": json.loads(row["mapping_json"])} for row in rows]
+
+    def list_statement_lines(self, account_id: str | None = None, state: str | None = None) -> list[StatementLine]:
+        clauses, params = [], []
+        if account_id: clauses.append("account_id=?"); params.append(account_id)
+        if state: clauses.append("state=?"); params.append(state)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM statement_lines" + where + " ORDER BY booked_on, created_at", params).fetchall()
+        return [StatementLine(row["id"], row["import_id"], row["account_id"], date.fromisoformat(row["booked_on"]), row["amount"], row["description"], row["statement_balance"], StatementLineState(row["state"]), row["matched_type"], row["matched_id"]) for row in rows]
+
+    def latest_statement_balance(self, account_id: str) -> int | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT statement_balance FROM statement_lines
+                WHERE account_id=? AND statement_balance IS NOT NULL
+                ORDER BY booked_on DESC, created_at DESC LIMIT 1""", (account_id,)
+            ).fetchone()
+        return int(row["statement_balance"]) if row is not None else None
+
+    def _statement_line(self, line_id: str) -> StatementLine:
+        line = next((item for item in self.list_statement_lines() if item.id == line_id), None)
+        if line is None: raise ValueError("statement line does not exist")
+        return line
+
+    def statement_candidates(self, line_id: str, days: int = 3) -> list[dict[str, object]]:
+        line = self._statement_line(line_id)
+        if line.state in {StatementLineState.MATCHED, StatementLineState.EXCLUDED}: return []
+        candidates: list[dict[str, object]] = []
+        for item in self.list_transactions():
+            if item.account_id == line.account_id and item.amount == line.amount and abs((item.booked_on - line.booked_on).days) <= days:
+                candidates.append({"type": "transaction", "id": item.id, "booked_on": item.booked_on, "amount": item.amount, "description": item.description})
+        for item in self.list_journal_entries():
+            signed = item.amount if item.debit_account_id == line.account_id else -item.amount if item.credit_account_id == line.account_id else 0
+            if signed == line.amount and abs((item.booked_on - line.booked_on).days) <= days:
+                candidates.append({"type": "journal_entry", "id": item.id, "booked_on": item.booked_on, "amount": signed, "description": item.description})
+        return candidates
+
+    def set_statement_state(self, line_id: str, state: StatementLineState, matched_type: str | None = None, matched_id: str | None = None) -> StatementLine:
+        line = self._statement_line(line_id)
+        if state == StatementLineState.MATCHED and (not matched_type or not matched_id): raise ValueError("matched records require type and id")
+        if state == StatementLineState.MATCHED:
+            candidates = self.statement_candidates(line_id)
+            if not any(item["type"] == matched_type and item["id"] == matched_id for item in candidates):
+                raise ValueError("matched record is not a valid statement candidate")
+        with self._connect() as connection:
+            connection.execute("UPDATE statement_lines SET state=?, matched_type=?, matched_id=? WHERE id=?", (state.value, matched_type, matched_id, line_id))
+        return self._statement_line(line_id)
+
+    def create_transaction_from_statement(self, line_id: str, kind: TransactionKind, category: str) -> Transaction:
+        line = self._statement_line(line_id)
+        if line.state in {StatementLineState.MATCHED, StatementLineState.EXCLUDED}: raise ValueError("statement line is already resolved")
+        if kind == TransactionKind.INCOME and line.amount < 0 or kind == TransactionKind.EXPENSE and line.amount > 0:
+            raise ValueError("transaction kind does not match statement amount")
+        category = self._clean_name(category)
+        transaction = Transaction(str(uuid4()), line.account_id, line.booked_on, line.amount, kind, category, line.description)
+        with self._connect() as connection:
+            connection.execute("INSERT INTO transactions(id, account_id, booked_on, amount, kind, category, description) VALUES (?, ?, ?, ?, ?, ?, ?)", (transaction.id, transaction.account_id, transaction.booked_on.isoformat(), transaction.amount, transaction.kind.value, transaction.category, transaction.description))
+            connection.execute("UPDATE statement_lines SET state='matched', matched_type='transaction', matched_id=? WHERE id=? AND state NOT IN ('matched','excluded')", (transaction.id, line_id))
+        return transaction
+
+    def create_transfer_from_statements(self, first_line_id: str, second_line_id: str) -> JournalEntry:
+        first, second = self._statement_line(first_line_id), self._statement_line(second_line_id)
+        if first.id == second.id or first.account_id == second.account_id or first.amount + second.amount != 0 or first.state in {StatementLineState.MATCHED, StatementLineState.EXCLUDED} or second.state in {StatementLineState.MATCHED, StatementLineState.EXCLUDED}:
+            raise ValueError("lines do not form an unresolved transfer")
+        debit, credit = (first.account_id, second.account_id) if first.amount > 0 else (second.account_id, first.account_id)
+        entry = JournalEntry(str(uuid4()), max(first.booked_on, second.booked_on), first.description or second.description, debit, credit, abs(first.amount), None)
+        with self._connect() as connection:
+            connection.execute("INSERT INTO journal_entries(id, booked_on, description, debit_account_id, credit_account_id, amount) VALUES (?, ?, ?, ?, ?, ?)", (entry.id, entry.booked_on.isoformat(), entry.description, entry.debit_account_id, entry.credit_account_id, entry.amount))
+            connection.execute("UPDATE statement_lines SET state='matched', matched_type='journal_entry', matched_id=? WHERE id IN (?, ?)", (entry.id, first.id, second.id))
+        return entry
 
     @staticmethod
     def _clean_name(name: str) -> str:
