@@ -20,14 +20,11 @@ jobs:
           cache: pip
       - name: Install package and development dependencies
         run: python -m pip install -e ".[dev]"
-      - name: Compile source and tests
-        run: python -m compileall -q src tests
-      - name: Run the complete test suite with coverage
-        run: python -m pytest --cov=personal_finance_os --cov-report=term-missing --cov-report=xml
-      - name: Enforce total coverage
-        run: python -m coverage report --fail-under=80
-      - name: Enforce AI CFO coverage
-        run: >-
-          python -m coverage report
-          --include="src/personal_finance_os/ai_cfo.py,src/personal_finance_os/ai_intents.py"
-          --fail-under=90
+      - name: Run the verification harness
+        run: python scripts/check.py
+      - name: Upload coverage evidence
+        if: always() && hashFiles('coverage.xml') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-py${{ matrix.python-version }}
+          path: coverage.xml

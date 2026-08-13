@@ -173,12 +173,30 @@
     </form>
     <pre id="purchaseResult">購入判断をここに表示します。</pre>
   </section>
+
+  <section class="card wide">
+    <h2>口座明細の取込・照合</h2>
+    <div class="muted small">銀行・現金口座のCSVを取り込みます。日付・金額列を指定し、摘要・残高列は任意です。候補は必ず確認して確定します。</div>
+    <form id="statementForm" style="margin-top:12px">
+      <label>対象口座<select name="account_id" id="statementAccount" required></select></label>
+      <label>CSVファイル<input name="file" type="file" accept=".csv,text/csv" required /></label>
+      <label>日付列<input name="date" value="date" required /></label>
+      <label>金額列<input name="amount" value="amount" placeholder="amount（入出金別なら空欄）" /></label>
+      <label>入金列<input name="deposit" placeholder="deposit" /></label>
+      <label>出金列<input name="withdrawal" placeholder="withdrawal" /></label>
+      <label>摘要列<input name="description" value="description" /></label>
+      <label>残高列<input name="balance" placeholder="balance" /></label>
+      <button>明細を取込</button>
+    </form>
+    <div id="statementNotice" class="notice"></div>
+    <div class="table-wrap"><table><thead><tr><th>日付</th><th>金額</th><th>摘要</th><th>状態</th><th>操作</th></tr></thead><tbody id="statementRows"></tbody></table></div>
+  </section>
 </main>
 <script>
 const yen = new Intl.NumberFormat('ja-JP',{style:'currency',currency:'JPY',maximumFractionDigits:0});
 const pct = value => `${(Number(value)*100).toFixed(1)}%`;
 const $ = id => document.getElementById(id);
-let recurring = [], events = [], scenarios = [], latestForecast = null;
+let recurring = [], events = [], scenarios = [], statementLines = [], latestForecast = null;
 function monthStart(d=new Date()){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`; }
 function setStatus(text){ $('status').textContent=text; }
 function showNotice(id,text){ $(id).textContent=text||''; }
@@ -225,8 +243,13 @@ async function compareForecasts(){
   const f=bodyFrom($('forecastForm')); try{const result=await request('/api/forecasts/compare',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({start_date:f.start_date,period_years:Number(f.period_years),cases:names.map(name=>({name}))})}); $('compareRows').innerHTML=result.cases.map(x=>`<tr><td>${x.scenario_name}</td><td>${yen.format(x.ending_balance)}</td><td>${yen.format(x.minimum_balance)}</td><td>${yen.format(x.monthly.reduce((s,m)=>s+m.net_cash_flow,0))}</td></tr>`).join('');showNotice('compareNotice','比較完了');}catch(e){showNotice('compareNotice',e.message);}
 }
 async function refreshAll(){
-  try{setStatus('更新中…');[recurring,events,scenarios]=await Promise.all([request('/api/recurring-cash-flows'),request('/api/life-events'),request('/api/forecast-scenarios')]);renderRecurring();renderEvents();renderScenarios();await refreshSummary();const accounts=await request('/api/accounts');$('accountRows').innerHTML=accounts.map(x=>`${x.name}: ${x.id} / ${yen.format(x.balance)}`).join('<br>')||'口座なし';setStatus(`最終更新 ${new Date().toLocaleTimeString('ja-JP')}`);}catch(e){setStatus(e.message);}
+  try{setStatus('更新中…');[recurring,events,scenarios,statementLines]=await Promise.all([request('/api/recurring-cash-flows'),request('/api/life-events'),request('/api/forecast-scenarios'),request('/api/statement-lines')]);renderRecurring();renderEvents();renderScenarios();renderStatementLines();await refreshSummary();const accounts=await request('/api/accounts');$('accountRows').innerHTML=accounts.map(x=>`${x.name}: ${x.id} / ${yen.format(x.balance)}`).join('<br>')||'口座なし';$('statementAccount').innerHTML=accounts.filter(x=>x.account_type==='bank'||x.account_type==='cash').map(x=>`<option value="${x.id}">${x.name}</option>`).join('')||'<option value="">銀行・現金口座がありません</option>';setStatus(`最終更新 ${new Date().toLocaleTimeString('ja-JP')}`);}catch(e){setStatus(e.message);}
 }
+function renderStatementLines(){ $('statementRows').innerHTML=statementLines.map(x=>`<tr><td>${x.booked_on}</td><td>${yen.format(x.amount)}</td><td>${x.description||'—'}</td><td>${x.state}</td><td class="actions">${x.state==='unmatched'||x.state==='suggested'?`<button class="secondary" onclick="showStatementCandidates('${x.id}')">候補</button><button class="secondary" onclick="confirmStatementTransfer('${x.id}')">振替</button><button class="secondary" onclick="createStatementTransaction('${x.id}',${x.amount})">取引登録</button><button class="danger" onclick="excludeStatementLine('${x.id}')">除外</button>`:'—'}</td></tr>`).join('')||'<tr><td colspan="5" class="muted">明細なし</td></tr>'; }
+async function showStatementCandidates(id){try{const r=await request(`/api/statement-lines/${id}/candidates`);if(!r.candidates.length){showNotice('statementNotice','一致候補なし');return;}const choices=r.candidates.map((x,i)=>`${i+1}. ${x.booked_on} ${yen.format(x.amount)} ${x.description||''}`).join('\n');const selected=Number(prompt(`照合する候補番号を入力してください。\n${choices}`));const x=r.candidates[selected-1];if(!x)return;await request(`/api/statement-lines/${id}/match`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({matched_type:x.type,matched_id:x.id})});await refreshAll();}catch(e){showNotice('statementNotice',e.message)}}
+async function confirmStatementTransfer(id){try{const r=await request(`/api/statement-lines/${id}/transfer-candidates`);if(!r.candidates.length){showNotice('statementNotice','振替候補がありません。');return;}const x=r.candidates[0];if(!confirm(`${x.booked_on} ${yen.format(x.amount)} を口座間振替として確定しますか？`))return;await request(`/api/statement-lines/${id}/transfer`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({other_line_id:x.id})});await refreshAll();}catch(e){showNotice('statementNotice',e.message)}}
+async function createStatementTransaction(id,amount){const category=prompt('カテゴリを入力してください');if(!category)return;try{await request(`/api/statement-lines/${id}/transaction`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:amount>0?'income':'expense',category})});await refreshAll();}catch(e){showNotice('statementNotice',e.message)}}
+async function excludeStatementLine(id){try{await request(`/api/statement-lines/${id}/exclude`,{method:'POST'});await refreshAll();}catch(e){showNotice('statementNotice',e.message)}}
 $('recurringForm').addEventListener('submit',async e=>{e.preventDefault();const f=bodyFrom(e.target),id=f.id;delete f.id;f.amount=Number(f.amount);try{await request(id?`/api/recurring-cash-flows/${id}`:'/api/recurring-cash-flows',{method:id?'PATCH':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});resetRecurringForm();showNotice('recurringNotice','保存しました');await refreshAll();}catch(x){showNotice('recurringNotice',x.message);}});
 $('eventForm').addEventListener('submit',async e=>{e.preventDefault();const f=bodyFrom(e.target),id=f.id;delete f.id;for(const k of ['duration_months','income_delta','expense_delta'])f[k]=Number(f[k]);try{await request(id?`/api/life-events/${id}`:'/api/life-events',{method:id?'PATCH':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});resetEventForm();showNotice('eventNotice','保存しました');await refreshAll();}catch(x){showNotice('eventNotice',x.message);}});
 $('forecastForm').addEventListener('submit',e=>{e.preventDefault();runForecast();});
@@ -234,6 +257,7 @@ $('caseForm').addEventListener('submit',async e=>{e.preventDefault();const f=bod
 $('accountForm').addEventListener('submit',async e=>{e.preventDefault();const f=bodyFrom(e.target);f.opening_balance=Number(f.opening_balance);try{await request('/api/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});e.target.reset();await refreshAll();}catch(x){alert(x.message);}});
 $('taxForm').addEventListener('submit',async e=>{e.preventDefault();const f=bodyFrom(e.target);for(const k of ['tax_year','gross_salary','social_insurance_premiums'])f[k]=Number(f[k]);try{const t=await request('/api/tax/estimate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});$('taxResult').textContent=`給与所得控除: ${yen.format(t.employment_income_deduction)}\n給与所得: ${yen.format(t.employment_income)}\n課税所得: ${yen.format(t.taxable_income)}\n所得税等: ${yen.format(t.total_tax)}\nルール: ${t.rule_version}`;}catch(x){$('taxResult').textContent=x.message;}});
 $('purchaseForm').addEventListener('submit',async e=>{e.preventDefault();const f=bodyFrom(e.target);for(const k of ['price','horizon_months','annual_return_rate'])f[k]=Number(f[k]);try{const s=await request('/api/scenarios/purchase',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(f)});$('purchaseResult').textContent=`判定: ${s.verdict}\n購入可能度: ${s.affordability_score}/100\n購入後流動資産: ${yen.format(s.post_purchase_liquid_assets)}\n機会費用: ${yen.format(s.opportunity_cost)}\n${s.horizon_months}か月後の資産差を含めて定量評価しています。`;}catch(x){$('purchaseResult').textContent=x.message;}});
+$('statementForm').addEventListener('submit',async e=>{e.preventDefault();const f=e.target, file=f.file.files[0];if(!file)return;const mapping={};for(const key of ['date','amount','deposit','withdrawal','description','balance'])if(f[key].value.trim())mapping[key]=f[key].value.trim();try{const r=await request('/api/statement-imports',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({account_id:f.account_id.value,csv_text:await file.text(),mapping})});showNotice('statementNotice',`${r.imported}件を取込、${r.skipped}件を重複としてスキップしました。`);await refreshAll();}catch(x){showNotice('statementNotice',x.message);}});
 $('recurringForm').start_date.value=monthStart(); $('eventForm').start_date.value=monthStart(); $('forecastForm').start_date.value=monthStart(); refreshAll();
 </script>
 </body>

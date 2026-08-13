@@ -22,6 +22,13 @@ class TransactionKind(StrEnum):
     ADJUSTMENT = "adjustment"
 
 
+class StatementLineState(StrEnum):
+    UNMATCHED = "unmatched"
+    SUGGESTED = "suggested"
+    MATCHED = "matched"
+    EXCLUDED = "excluded"
+
+
 class CashFlowType(StrEnum):
     INCOME = "income"
     EXPENSE = "expense"
@@ -60,6 +67,20 @@ class JournalEntry:
     credit_account_id: str
     amount: int
     external_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StatementLine:
+    id: str
+    import_id: str
+    account_id: str
+    booked_on: date
+    amount: int
+    description: str
+    statement_balance: int | None
+    state: StatementLineState
+    matched_type: str | None = None
+    matched_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
